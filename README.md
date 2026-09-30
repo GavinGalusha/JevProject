@@ -136,6 +136,20 @@ Then follow [Safe first test and kill switches](#safe-first-test-and-kill-switch
 
 Exact phrases such as `pause`, `mute`, `fullscreen`, `volume up` and `back 30` are matched with a regex and run as JavaScript on the current video: instant, with no API call. Anything else goes to Jev, which loops over observing the page, asking TypeSafe which element to use next, and acting in Chrome. OpenAI is called only when Jev needs text to type into a field.
 
+## Setup (Windows)
+
+On the Windows PC, install Git first (<https://git-scm.com/download/win>, or `winget install Git.Git`), then open PowerShell and run:
+
+```powershell
+git clone https://github.com/GavinGalusha/JevProject.git
+cd JevProject
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```
+
+The script installs anything missing (uv, Google Chrome) with winget, runs `uv sync`, creates `.env` with a generated `JEV_REMOTE_TOKEN`, and adds a firewall rule for TCP 8787 on Private networks only (this part needs an Administrator PowerShell; otherwise it tells you). It never overwrites values already in `.env`, so it is safe to re-run. Add `-InstallStartup` (as Administrator) to also start Jev Remote at sign-in, or `-SkipFirewall` to skip the firewall rule.
+
+When it finishes, open `.env` and fill in `TYPESAFE_API_KEY` and `OPENAI_API_KEY`, then run `uv run jev-remote`. It opens the dedicated Chrome profile for you and prints a QR code for pairing your phone. Log into streaming sites in that Chrome window only.
+
 ## Milestone 1: prove Jev can control Chrome (Windows)
 
 Do this on the Windows PC before running Jev Remote.
