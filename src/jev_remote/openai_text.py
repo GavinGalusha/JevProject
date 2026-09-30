@@ -57,14 +57,21 @@ def field_text(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
             ],
         }
     )
+    field = (context.get("field") or {}).get("label")
+    raw = ""
     try:
-        output = json.loads(result["choices"][0]["message"]["content"])
+        raw = result["choices"][0]["message"]["content"] or ""
+        output = json.loads(raw)
         value = output["text"]
         valid = set(output) == {"text"} and isinstance(value, str) and value.strip()
         if not valid or len(value) > 2000:
             raise ValueError
-    except (ValueError, KeyError, TypeError, json.JSONDecodeError):
-        raise ValueError("OpenAI returned no valid field value; nothing was typed.") from None
+    except (ValueError, KeyError, TypeError, json.JSONDecodeError, IndexError):
+        reason = result.get("choices", [{}])[0].get("finish_reason")
+        raise ValueError(
+            f"OpenAI returned no valid value for field {field!r} "
+            f"(finish_reason={reason}, response={raw[:200]!r}); nothing was typed."
+        ) from None
     return value, {
         "model": model,
         "latency_ms": round((time.perf_counter() - started) * 1000),

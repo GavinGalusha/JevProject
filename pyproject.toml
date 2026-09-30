@@ -8,6 +8,7 @@ dependencies = [
   "fastapi>=0.116,<1",
   "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast.git@main",
   "python-dotenv>=1.1,<2",
+  "qrcode>=8,<9",
   "uvicorn[standard]>=0.35,<1",
 ]
 

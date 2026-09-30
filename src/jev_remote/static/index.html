@@ -39,8 +39,15 @@
         </div>
       </section>
 
+      <button id="save-command" class="save-button" hidden>★ SAVE THIS COMMAND</button>
+
       <button id="kill" class="kill-button">■ STOP &amp; LOCK</button>
       <button id="arm" class="arm-button" hidden>RE-ARM REMOTE</button>
+
+      <section id="saved-section" class="saved" hidden>
+        <label>SAVED COMMANDS</label>
+        <div id="saved-list"></div>
+      </section>
 
       <section class="controls" aria-label="Media controls">
         <button data-command="back 30 seconds"><span>↶</span><small>30</small></button>
@@ -56,11 +63,28 @@
     <dialog id="token-dialog">
       <form method="dialog" id="token-form">
         <h2>Connect to your PC</h2>
-        <p>Paste the private token from the PC’s <code>.env</code> file. It stays on this device.</p>
-        <input id="token" type="password" autocomplete="current-password" placeholder="JEV_REMOTE_TOKEN" minlength="32" required>
+        <p>Scan the QR code shown in the PC’s terminal, or enter the 8-character pairing code it prints. You can also paste the full token from <code>.env</code>. It stays on this device.</p>
+        <input id="token" type="password" autocomplete="current-password" placeholder="Pairing code or token" required>
         <div class="dialog-actions">
           <button value="cancel" class="secondary">Cancel</button>
           <button value="default" id="save-token">Save token</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="save-dialog">
+      <form method="dialog" id="save-form">
+        <h2>Save command</h2>
+        <p>Tap it later to run it again. Put a name in braces, like <code>{show}</code>, to be asked for it each time.</p>
+        <label for="save-name">NAME</label>
+        <input id="save-name" maxlength="60" placeholder="Watch on Wootly" required>
+        <label for="save-text">COMMAND</label>
+        <textarea id="save-text" rows="5" maxlength="2000" required></textarea>
+        <label for="save-url">START PAGE (OPTIONAL)</label>
+        <input id="save-url" inputmode="url" placeholder="https://your-streaming-site.com/">
+        <label class="check"><input id="save-fullscreen" type="checkbox"> Go fullscreen when it finishes</label>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary">Cancel</button>
+          <button value="default">Save</button>
         </div>
       </form>
     </dialog>

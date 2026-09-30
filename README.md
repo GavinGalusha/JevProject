@@ -120,7 +120,9 @@ You should see a line such as `Launched Chrome (profile ...) at http://127.0.0.1
 - On the same computer: <http://127.0.0.1:8787>
 - On a phone on the same Wi-Fi: `http://<Mac-LAN-IP>:8787`. Find the address with `ipconfig getifaddr en0`.
 
-Paste `JEV_REMOTE_TOKEN` when prompted. Then follow [Safe first test and kill switches](#safe-first-test-and-kill-switches): tap **STOP & LOCK**, confirm commands are rejected, tap **RE-ARM REMOTE**, and send a harmless command such as `Find the Wikipedia page for Apollo 11 and stop when it is open`. Voice input is optional, since everything can be typed.
+On a phone, pair instead of typing the long token. When the server starts it prints a QR code and an 8-character pairing code (for example `A59A-F869`). Scan the QR code with the phone's camera, or open the address and type the code into the prompt. The code works once, expires after 15 minutes, and is locked after 5 wrong guesses; restart `uv run jev-remote` for a new one. On this computer, you can still paste `JEV_REMOTE_TOKEN` directly.
+
+Then follow [Safe first test and kill switches](#safe-first-test-and-kill-switches): tap **STOP & LOCK**, confirm commands are rejected, tap **RE-ARM REMOTE**, and send a harmless command such as `Find the Wikipedia page for Apollo 11 and stop when it is open`. Voice input is optional, since everything can be typed.
 
 ### Troubleshooting
 
@@ -189,6 +191,16 @@ Windows may ask whether Python can accept connections. Allow it only on **Privat
 The page uses the phone browser's built-in Speech Recognition API. Support varies by browser, and some phones block microphone features on plain HTTP pages. Typed commands and all remote buttons still work. HTTPS or a native wrapper can be added after the Chrome/streaming experiment proves reliable.
 
 The token is stored in the phone browser's local storage. LAN HTTP does not encrypt traffic, so use this only on a trusted home network. Pairing and local HTTPS are sensible next security milestones.
+
+## Saved commands
+
+When a command finishes successfully, the page shows **★ SAVE THIS COMMAND**. Give it a name and optionally:
+
+- a **start page**, so the command always begins on your streaming site instead of the last open tab
+- **Go fullscreen when it finishes**, which runs the fullscreen control after Jev reports success
+- a **`{placeholder}`** in the command text, for example `Search for {show}, pick the Wootly server instead of vidsrc, and start playback`. The page asks for each placeholder when you tap the saved command.
+
+Saved commands appear as buttons on the page; tap **×** to delete one. They are stored in `saved_commands.json` in the project folder (override with `JEV_SAVED_COMMANDS_FILE`), which is gitignored. Fullscreen first tries the page's `<video>`, then falls back to the largest `<iframe>`, because embedded players are usually iframes.
 
 ## Safe first test and kill switches
 
