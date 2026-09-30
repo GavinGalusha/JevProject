@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#111111">
+    <title>Jev Remote</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <main class="remote">
+      <header>
+        <span class="eyebrow">LIVING ROOM</span>
+        <h1>JEV</h1>
+        <button id="settings" class="icon-button" aria-label="Change access token">⚙</button>
+      </header>
+
+      <section class="voice-section">
+        <button id="speak" class="speak" aria-label="Speak a command">
+          <span class="mic">●</span>
+          <span>HOLD TO SPEAK</span>
+        </button>
+        <p id="voice-help" class="hint">Or type a command below</p>
+      </section>
+
+      <form id="command-form" autocomplete="off">
+        <label for="command">COMMAND</label>
+        <div class="command-row">
+          <input id="command" name="command" placeholder="Play How I Met Your Mother" maxlength="2000">
+          <button type="submit" aria-label="Send command">→</button>
+        </div>
+      </form>
+
+      <section class="status-card" aria-live="polite">
+        <span id="status-dot" class="status-dot"></span>
+        <div>
+          <strong id="status-title">Ready</strong>
+          <p id="status-message">Enter the PC token to connect.</p>
+        </div>
+      </section>
+
+      <button id="kill" class="kill-button">■ STOP &amp; LOCK</button>
+      <button id="arm" class="arm-button" hidden>RE-ARM REMOTE</button>
+
+      <section class="controls" aria-label="Media controls">
+        <button data-command="back 30 seconds"><span>↶</span><small>30</small></button>
+        <button data-command="play pause" class="primary"><span>▶</span><small>PLAY</small></button>
+        <button data-command="forward 30 seconds"><span>↷</span><small>30</small></button>
+        <button data-command="volume down"><span>−</span><small>VOL</small></button>
+        <button data-command="mute"><span>◖</span><small>MUTE</small></button>
+        <button data-command="volume up"><span>+</span><small>VOL</small></button>
+        <button data-command="fullscreen" class="wide"><span>⛶</span><small>FULLSCREEN</small></button>
+      </section>
+    </main>
+
+    <dialog id="token-dialog">
+      <form method="dialog" id="token-form">
+        <h2>Connect to your PC</h2>
+        <p>Paste the private token from the PC’s <code>.env</code> file. It stays on this device.</p>
+        <input id="token" type="password" autocomplete="current-password" placeholder="JEV_REMOTE_TOKEN" minlength="32" required>
+        <div class="dialog-actions">
+          <button value="cancel" class="secondary">Cancel</button>
+          <button value="default" id="save-token">Save token</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
