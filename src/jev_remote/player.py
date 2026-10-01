@@ -21,7 +21,6 @@ PLAYER_PROBE = r"""(() => {
   for (const e of document.querySelectorAll('video,iframe,embed,object')) {
     if (!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
     if (e.closest('[aria-hidden="true"],[inert]')) continue;
-    if (e.tagName === 'VIDEO' && !e.paused && !e.ended) continue;  // already playing
     const r = e.getBoundingClientRect();
     const w = Math.min(r.right, vw) - Math.max(r.left, 0);
     const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
@@ -39,9 +38,41 @@ PLAYER_PROBE = r"""(() => {
     node: id,
     guard: cache.guard(e),
     tag: e.tagName.toLowerCase(),
+    src: (e.src || e.currentSrc || '').slice(0, 300),
+    fullscreen: !!document.fullscreenElement,
+    playing: e.tagName === 'VIDEO' && !e.paused && !e.ended,
     rect: {x: r.x, y: r.y, w: r.width, h: r.height},
   };
 })()"""
+
+# Reads the real <video> state inside a player frame (run in that frame, never in the page).
+VIDEO_STATE_JS = r"""(() => [...document.querySelectorAll('video')].map(v => ({
+  paused: v.paused, ended: v.ended, t: v.currentTime, ready: v.readyState,
+})))()"""
+
+
+# Same, for a same-origin iframe or a <video> reached through Jev's element cache.
+def inline_video_js(node: int) -> str:
+    return (
+        "(() => { const e = window.__jevFast && window.__jevFast.nodes.get(%d);"
+        " if (!e) return null;"
+        " const pick = d => [...d.querySelectorAll('video')].map(v => ({paused: v.paused,"
+        " ended: v.ended, t: v.currentTime, ready: v.readyState}));"
+        " if (e.tagName === 'VIDEO') return pick({querySelectorAll: () => [e]});"
+        " try { return e.contentDocument ? pick(e.contentDocument) : null; }"
+        " catch (x) { return null; } })()" % node
+    )
+
+
+def videos_playing(first: list[dict], second: list[dict]) -> bool:
+    """True if any video is unpaused and its clock moved between two reads."""
+    for before, after in zip(first, second, strict=False):
+        if before.get("paused") or after.get("paused") or after.get("ended"):
+            continue
+        if float(after.get("t", 0)) > float(before.get("t", 0)) + 0.15:
+            return True
+    return False
+
 
 _PLAYBACK_INTENT = re.compile(
     r"\b(?:play|watch|stream|start playback|put on|start the)\b", re.IGNORECASE
@@ -53,10 +84,20 @@ PLAYBACK_RULES = (
     "video player itself to start playback. Do not open 'Direct Links', download, mirror, "
     "external-host or other server links, and do not leave the episode page while its player is "
     "visible. If this looks like a movie or episode page but no video player is offered yet, "
-    "WAIT for it to load instead of opening other links. After you have clicked the video player "
-    "once, the task is complete: choose DONE and do not click the player again, because that "
-    "would pause it."
+    "WAIT for it to load instead of opening other links. Players often need more than one click "
+    "(the first can just wake the player or trigger an ad). The task is complete only when the "
+    "page text says the video player is playing: choose DONE then, and never click a player that "
+    "is already playing, because that would pause it. If the page text says it has not started "
+    "yet, click the video player again."
 )
+
+NOTE_PLAYING = "[Jev] The video player is now playing. The playback goal is complete."
+NOTE_NOT_STARTED = (
+    "[Jev] The video player has not started playing yet (clicked {clicks} time(s) so far). "
+    "Click the video player again."
+)
+NOTE_GAVE_UP = "[Jev] The video player did not start playing after {clicks} clicks."
+MAX_PLAYER_CLICKS = 4
 
 
 def with_playback_rules(goal: str) -> str:

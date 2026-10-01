@@ -146,6 +146,28 @@ def main() -> int:
                 str(clicked),
             )
 
+        browser.call("Page.navigate", url=BASE + "player_page2.html")
+        time.sleep(1.2)
+        browser._player_clicks = 0
+        outcome = "never offered"
+        for attempt in range(1, 5):
+            page = browser.observe(screenshot=False)
+            offered = [a for a in page["actions"] if a["label"] == PLAYER_LABEL]
+            if not offered:
+                outcome = (
+                    f"playing after {attempt - 1} click(s)"
+                    if "now playing" in page["text"]
+                    else "stopped being offered"
+                )
+                break
+            browser.act(offered[0], page)
+            time.sleep(1.0)
+        check(
+            "two-step player (ad on first click) is clicked until it plays, then left alone",
+            outcome == "playing after 2 click(s)",
+            outcome,
+        )
+
         browser.call("Page.navigate", url=BASE + "ad_popup.html")
         time.sleep(0.6)
         before = page_tabs()

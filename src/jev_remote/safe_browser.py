@@ -9,7 +9,17 @@ from urllib.parse import urlparse
 from jev_ultrafast.browser import Browser, StalePage, fingerprint
 
 from .console import say
-from .player import PLAYER_LABEL, PLAYER_PROBE
+from .player import (
+    MAX_PLAYER_CLICKS,
+    NOTE_GAVE_UP,
+    NOTE_NOT_STARTED,
+    NOTE_PLAYING,
+    PLAYER_LABEL,
+    PLAYER_PROBE,
+    VIDEO_STATE_JS,
+    inline_video_js,
+    videos_playing,
+)
 from .popups import OVERLAY_PROBE, popup_targets_to_close
 
 _GUARD_FIELDS = (
@@ -92,6 +102,8 @@ class StableTargetBrowser(Browser):
     # Set per run by the controller: playback goals wait for the player to appear.
     expect_player: bool = False
     _player_waited_url: str | None = None
+    _player_clicks: int = 0
+    _frame_sessions: dict[str, str] | None = None
 
     def __init__(self, url: str):
         super().__init__(url)
@@ -165,45 +177,157 @@ class StableTargetBrowser(Browser):
             page = self._observe_page(screenshot)
         return self._with_video_player(page)
 
+    def _read_videos(self, found: dict[str, Any]) -> list[dict[str, Any]] | None:
+        """The real <video> state behind the player, or None if it cannot be read.
+
+        Same-origin frames are read from the page. A cross-origin player is its own CDP target;
+        attach to it and ask it directly, which is far better evidence than looking at pixels.
+        """
+        inline = self.evaluate(inline_video_js(found["node"]))
+        if isinstance(inline, list):
+            return inline
+        from browser_harness.helpers import cdp
+
+        host = urlparse(found.get("src") or "").hostname
+        if not host:
+            return None
+        if self._frame_sessions is None:
+            self._frame_sessions = {}
+        videos: list[dict[str, Any]] = []
+        seen_frame = False
+        for target in cdp("Target.getTargets").get("targetInfos", []):
+            if target.get("type") != "iframe" or urlparse(target.get("url", "")).hostname != host:
+                continue
+            seen_frame = True
+            session = self._frame_sessions.get(target["targetId"])
+            if session is None:
+                session = cdp("Target.attachToTarget", targetId=target["targetId"], flatten=True)[
+                    "sessionId"
+                ]
+                self._frame_sessions[target["targetId"]] = session
+            result = cdp(
+                "Runtime.evaluate",
+                session_id=session,
+                expression=VIDEO_STATE_JS,
+                returnByValue=True,
+            )
+            videos.extend(result.get("result", {}).get("value") or [])
+        return videos if seen_frame else None
+
+    def _player_is_playing(self, found: dict[str, Any]) -> bool:
+        """Is something actually playing? Video clock first; pixels only if it cannot be read."""
+        try:
+            first = self._read_videos(found)
+            if first is not None:
+                if not first:
+                    return False  # the player frame exists but has no <video> yet
+                time.sleep(0.6)
+                second = self._read_videos(found) or []
+                return videos_playing(first, second)
+        except Exception as exc:
+            say(f"   ⚠ could not read the video state ({exc}); comparing frames instead", "dim")
+        return self._frames_change(found.get("rect") or {})
+
+    def _leave_fullscreen(self) -> None:
+        """A click that lands on a fullscreen control must not strand the run in fullscreen."""
+        try:
+            self.call(
+                "Runtime.evaluate",
+                expression="document.fullscreenElement ? document.exitFullscreen() : null",
+                awaitPromise=True,
+                userGesture=True,
+            )
+            time.sleep(0.5)
+            say("   ✕ left fullscreen (the click had not started playback)", "yellow")
+        except Exception:
+            pass
+
+    def _frames_change(self, rect: dict[str, Any]) -> bool:
+        """True if the player's pixels change over ~1s, i.e. something is playing.
+
+        A cross-origin iframe's video state cannot be read from the page, so look at the pixels.
+        A paused player is a still image and yields identical frames.
+        """
+        try:
+            clip = {
+                "x": max(0.0, float(rect.get("x", 0))),
+                "y": max(0.0, float(rect.get("y", 0))),
+                "width": max(1.0, float(rect.get("w", 1))),
+                "height": max(1.0, float(rect.get("h", 1))),
+                "scale": 0.5,
+            }
+            frames = set()
+            for index in range(3):
+                shot = self.call("Page.captureScreenshot", format="jpeg", quality=40, clip=clip)
+                frames.add(shot.get("data"))
+                if index < 2:
+                    time.sleep(0.5)
+            return len(frames) > 1
+        except Exception:
+            return False
+
+    def _probe_player(self) -> dict[str, Any] | None:
+        try:
+            found = self.evaluate(PLAYER_PROBE)
+        except Exception:
+            return None  # mid-navigation or similar; the caller may retry
+        return found if isinstance(found, dict) else None
+
     def _with_video_player(self, page: dict[str, Any]) -> dict[str, Any]:
         """Offer the embedded player as a control; the upstream reader skips iframes."""
         if os.environ.get("JEV_PLAYER_ACTION", "1").strip().lower() in {"0", "false", "no"}:
             return page
         if not getattr(self, "session", None):
             return page
-        try:
-            found = self.evaluate(PLAYER_PROBE)
-            url = page.get("url")
-            if not found and self.expect_player and url != self._player_waited_url:
-                # Players are usually injected a moment after load; wait once per page for it.
-                self._player_waited_url = url
-                deadline = time.monotonic() + _milliseconds("JEV_PLAYER_WAIT_MS", 1500) / 1000
-                while not found and time.monotonic() < deadline:
-                    time.sleep(0.25)
-                    found = self.evaluate(PLAYER_PROBE)
-        except Exception:
-            return page  # best effort: the normal controls are still usable
+        found = self._probe_player()
+        url = page.get("url")
+        if not found and self.expect_player and url != self._player_waited_url:
+            # Players are usually injected a moment after load; wait once per page for it.
+            self._player_waited_url = url
+            deadline = time.monotonic() + _milliseconds("JEV_PLAYER_WAIT_MS", 2500) / 1000
+            while not found and time.monotonic() < deadline:
+                time.sleep(0.25)
+                found = self._probe_player()
         if not isinstance(found, dict) or type(found.get("node")) is not int:
             return page
         actions = page.get("actions", [])
         if any(action.get("node") == found["node"] for action in actions):
             return page
-        player = {
-            "id": "e_player",
-            "node": found["node"],
-            "kind": "click",
-            "role": "button",
-            "label": PLAYER_LABEL,
-            "value": "",
-            "rect": found.get("rect") or {},
-        }
-        # Keep the real controls first; scroll/wait pseudo-actions stay at the end.
-        at = next(
-            (i for i, a in enumerate(actions) if a.get("kind") in {"scroll", "wait"}), len(actions)
-        )
-        page["actions"] = [*actions[:at], player, *actions[at:]]
-        page.setdefault("guards", {})[str(found["node"])] = found.get("guard")
+
+        note = None
+        offer = True
+        if self._player_clicks or found.get("playing"):
+            if found.get("playing") or self._player_is_playing(found):
+                note, offer = NOTE_PLAYING, False  # never offer a playing player: a click pauses it
+            elif self._player_clicks >= MAX_PLAYER_CLICKS:
+                note, offer = NOTE_GAVE_UP.format(clicks=self._player_clicks), False
+            else:
+                note = NOTE_NOT_STARTED.format(clicks=self._player_clicks)
+                if found.get("fullscreen"):
+                    self._leave_fullscreen()
+        if note:
+            page["text"] = f"{page.get('text', '')}\n{note}".strip()
+            say(f"   ▶ {note}", "dim")
+        if offer:
+            player = {
+                "id": "e_player",
+                "node": found["node"],
+                "kind": "click",
+                "role": "button",
+                "label": PLAYER_LABEL,
+                "value": "",
+                "rect": found.get("rect") or {},
+            }
+            # Keep the real controls first; scroll/wait pseudo-actions stay at the end.
+            at = next(
+                (i for i, a in enumerate(actions) if a.get("kind") in {"scroll", "wait"}),
+                len(actions),
+            )
+            page["actions"] = [*actions[:at], player, *actions[at:]]
+            page.setdefault("guards", {})[str(found["node"])] = found.get("guard")
         page["fingerprint"] = fingerprint(page)
+        if not offer:
+            return page
         say(f"   ▶ offering the page's video player ({found.get('tag')}) as a control", "dim")
         return page
 
@@ -313,6 +437,8 @@ class StableTargetBrowser(Browser):
                 clickCount=1,
             )
         self.after_input = action
+        if action.get("id") == "e_player":
+            self._player_clicks += 1
         return {"executed": action["id"]}
 
     # ----- Interruptions: popup tabs, in-page overlays and native dialogs -----

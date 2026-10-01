@@ -1,0 +1,11 @@
+<!doctype html><meta charset=utf-8><title>inner2</title>
+<body style="margin:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;height:100vh;font:48px monospace">
+<div id=t>▶ PLAY</div>
+<script>
+let clicks=0, started=false, n=0;
+document.body.addEventListener('click',()=>{
+  clicks++;
+  if(clicks===1){ window.open('http://localhost:8766/popunder.html','_blank'); return; }   // first click: an ad
+  if(!started){ started=true; setInterval(()=>{ n++; document.getElementById('t').textContent='0:0'+(n%10)+' PLAYING '+n; },150); }
+});
+</script>

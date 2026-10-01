@@ -1,4 +1,4 @@
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -119,3 +119,139 @@ def test_default_agent_factory_marks_playback_runs():
 
     assert is_playback_goal(with_playback_rules("play Moana"))
     assert not is_playback_goal("find the Wikipedia page for Apollo 11")
+
+
+def _player_probe(playing=False):
+    return {
+        "node": 41,
+        "guard": ["g"] * 14,
+        "tag": "iframe",
+        "playing": playing,
+        "rect": {"x": 0, "y": 84, "w": 900, "h": 500},
+    }
+
+
+def _labels(page):
+    return [a["label"] for a in page["actions"]]
+
+
+def test_after_a_click_that_did_not_start_playback_the_player_is_offered_again():
+    browser = _browser(_player_probe())
+    browser._player_clicks = 1
+    browser._player_is_playing = Mock(return_value=False)
+
+    page = browser._with_video_player(_page())
+
+    assert PLAYER_LABEL in _labels(page)
+    assert "has not started playing yet" in page["text"]
+
+
+def test_once_playing_the_player_is_not_offered_so_it_cannot_be_paused():
+    browser = _browser(_player_probe())
+    browser._player_clicks = 2
+    browser._player_is_playing = Mock(return_value=True)
+
+    page = browser._with_video_player(_page())
+
+    assert PLAYER_LABEL not in _labels(page)
+    assert "now playing" in page["text"]
+
+
+def test_a_video_element_that_is_already_playing_is_reported_without_a_click():
+    browser = _browser(_player_probe(playing=True))
+    page = browser._with_video_player(_page())
+    assert PLAYER_LABEL not in _labels(page) and "now playing" in page["text"]
+
+
+def test_the_player_is_given_up_on_after_the_click_limit():
+    from jev_remote.player import MAX_PLAYER_CLICKS
+
+    browser = _browser(_player_probe())
+    browser._player_clicks = MAX_PLAYER_CLICKS
+    browser._player_is_playing = Mock(return_value=False)
+
+    page = browser._with_video_player(_page())
+
+    assert PLAYER_LABEL not in _labels(page)
+    assert "did not start playing" in page["text"]
+
+
+def test_no_pixel_check_before_the_first_click():
+    browser = _browser(_player_probe())
+    browser._player_is_playing = Mock(return_value=True)
+    page = browser._with_video_player(_page())
+    browser._player_is_playing.assert_not_called()
+    assert PLAYER_LABEL in _labels(page) and "[Jev]" not in page["text"]
+
+
+def test_frames_change_detects_motion_and_stillness(monkeypatch):
+    monkeypatch.setattr("jev_remote.safe_browser.time.sleep", lambda _s: None)
+    rect = {"x": 0, "y": 84, "w": 900, "h": 500}
+
+    still = _browser(None)
+    still.call = Mock(return_value={"data": "same-frame"})
+    assert still._frames_change(rect) is False
+
+    moving = _browser(None)
+    moving.call = Mock(side_effect=[{"data": "a"}, {"data": "b"}, {"data": "c"}])
+    assert moving._frames_change(rect) is True
+
+    broken = _browser(None)
+    broken.call = Mock(side_effect=RuntimeError("tab closed"))
+    assert broken._frames_change(rect) is False
+
+
+def test_videos_playing_needs_an_advancing_clock():
+    from jev_remote.player import videos_playing
+
+    moving = ([{"paused": False, "ended": False, "t": 1.0}], [{"paused": False, "t": 1.7}])
+    assert videos_playing(*moving) is True
+    stuck = ([{"paused": False, "ended": False, "t": 1.0}], [{"paused": False, "t": 1.0}])
+    assert videos_playing(*stuck) is False  # buffering or frozen
+    paused = ([{"paused": True, "t": 1.0}], [{"paused": True, "t": 1.0}])
+    assert videos_playing(*paused) is False
+    assert videos_playing([], []) is False
+
+
+def test_player_state_prefers_the_real_video_clock_over_pixels(monkeypatch):
+    monkeypatch.setattr("jev_remote.safe_browser.time.sleep", lambda _s: None)
+    browser = _browser(None)
+    reads = [[{"paused": False, "ended": False, "t": 2.0}], [{"paused": False, "t": 2.8}]]
+    browser._read_videos = Mock(side_effect=reads)
+    browser._frames_change = Mock(return_value=False)  # pixels say still; the clock wins
+
+    assert browser._player_is_playing(_player_probe()) is True
+    browser._frames_change.assert_not_called()
+
+
+def test_a_player_frame_with_no_video_yet_is_not_playing_even_if_pixels_move(monkeypatch):
+    browser = _browser(None)
+    browser._read_videos = Mock(return_value=[])  # e.g. an ad animating in the frame
+    browser._frames_change = Mock(return_value=True)
+
+    assert browser._player_is_playing(_player_probe()) is False
+    browser._frames_change.assert_not_called()
+
+
+def test_pixels_are_only_the_fallback_when_the_video_cannot_be_read():
+    browser = _browser(None)
+    browser._read_videos = Mock(return_value=None)
+    browser._frames_change = Mock(return_value=True)
+    assert browser._player_is_playing(_player_probe()) is True
+
+    browser._read_videos = Mock(side_effect=RuntimeError("target gone"))
+    browser._frames_change = Mock(return_value=False)
+    assert browser._player_is_playing(_player_probe()) is False
+
+
+def test_an_accidental_fullscreen_is_left_before_the_player_is_offered_again():
+    browser = _browser({**_player_probe(), "fullscreen": True})
+    browser._player_clicks = 1
+    browser._player_is_playing = Mock(return_value=False)
+    browser.call = Mock()
+
+    with patch("jev_remote.safe_browser.time.sleep"):
+        page = browser._with_video_player(_page())
+
+    assert PLAYER_LABEL in _labels(page)
+    assert "exitFullscreen" in browser.call.call_args.kwargs["expression"]
