@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from jev_ultrafast.browser import Browser, StalePage, fingerprint
 
 from .console import say
+from .popups import OVERLAY_PROBE, popup_targets_to_close
 
 _GUARD_FIELDS = (
     "node identity",
@@ -36,6 +37,9 @@ def _is_google_page(url: Any) -> bool:
         return False
     hostname = (urlparse(url).hostname or "").casefold()
     return hostname == "google.com" or hostname.endswith(".google.com")
+
+
+_POPUP_PASSES = 3  # an overlay can reveal another one (consent, then newsletter)
 
 
 def _milliseconds(name: str, default: int) -> int:
@@ -84,6 +88,14 @@ class StableTargetBrowser(Browser):
     disconnected, hidden, disabled, or otherwise invalid targets immediately before input.
     """
 
+    def __init__(self, url: str):
+        super().__init__(url)
+        try:
+            # Without Page events the daemon never learns that an alert()/confirm() is open.
+            self.call("Page.enable")
+        except Exception as exc:
+            say(f"   ⚠ could not watch for browser dialogs: {exc}", "dim")
+
     @staticmethod
     def _filter_actions(page: dict[str, Any], *, announce: bool = True) -> dict[str, Any]:
         actions = page.get("actions", [])
@@ -128,9 +140,11 @@ class StableTargetBrowser(Browser):
         deadline = time.monotonic() + timeout_ms / 1000
         announced = False
         while True:
+            self._dismiss_native_dialog()
             try:
                 return super().observe(screenshot=screenshot)
-            except StalePage:
+            except (StalePage, TimeoutError):
+                # A TimeoutError here usually means an alert()/confirm() froze the page.
                 if time.monotonic() >= deadline:
                     raise
                 if not announced:
@@ -139,6 +153,14 @@ class StableTargetBrowser(Browser):
                 time.sleep(0.25)
 
     def observe(self, screenshot: bool = True):
+        page = self._observe_page(screenshot)
+        for _ in range(_POPUP_PASSES):
+            if not self._clear_interruptions():
+                break
+            page = self._observe_page(screenshot)
+        return page
+
+    def _observe_page(self, screenshot: bool = True):
         after_action = bool(getattr(self, "after_input", None))
         # Avoid repeated screenshot captures while checking readiness. The normal Jev loop has
         # screenshots disabled; when requested, capture one final image after settling.
@@ -245,6 +267,86 @@ class StableTargetBrowser(Browser):
             )
         self.after_input = action
         return {"executed": action["id"]}
+
+    # ----- Interruptions: popup tabs, in-page overlays and native dialogs -----
+
+    def _clear_interruptions(self) -> bool:
+        """Close what is in the way. Best effort: a failure here must never end the run."""
+        if os.environ.get("JEV_DISMISS_POPUPS", "1").strip().lower() in {"0", "false", "no"}:
+            return False
+        if not getattr(self, "session", None):
+            return False
+        try:
+            changed = self._close_popup_tabs()
+            changed = self._dismiss_overlay() or changed
+            return changed
+        except Exception as exc:
+            say(f"   ⚠ popup check skipped: {exc}", "dim")
+            return False
+
+    def _close_popup_tabs(self) -> bool:
+        from browser_harness.helpers import cdp
+
+        targets = cdp("Target.getTargets").get("targetInfos", [])
+        own = next((t for t in targets if t.get("targetId") == self.target), {})
+        popups = popup_targets_to_close(targets, self.target, own.get("url"))
+        for popup in popups:
+            cdp("Target.closeTarget", targetId=popup["targetId"])
+            say(f"   ✕ closed popup tab: {str(popup.get('url'))[:80]}", "yellow")
+        if popups:
+            cdp("Target.activateTarget", targetId=self.target)
+        return bool(popups)
+
+    def _dismiss_overlay(self) -> bool:
+        limit = _milliseconds("JEV_MAX_POPUP_DISMISSALS", 8)
+        used = getattr(self, "_popup_dismissals", 0)
+        if used >= limit:
+            return False
+        found = self.evaluate(OVERLAY_PROBE)
+        if not isinstance(found, dict) or not found.get("found"):
+            return False
+        self._popup_dismissals = used + 1
+        summary = found.get("summary") or ""
+        if found.get("x") is None:
+            # An interruption with no safe close control: Escape closes most modals.
+            say(f"   ✕ popup has no close button; pressing Escape ({summary!r})", "yellow")
+            for event in ("rawKeyDown", "keyUp"):
+                self.call(
+                    "Input.dispatchKeyEvent",
+                    type=event,
+                    key="Escape",
+                    code="Escape",
+                    windowsVirtualKeyCode=27,
+                )
+        else:
+            say(f"   ✕ dismissed popup via {found['name']!r} ({summary!r})", "yellow")
+            for event in ("mouseMoved", "mousePressed", "mouseReleased"):
+                self.call(
+                    "Input.dispatchMouseEvent",
+                    type=event,
+                    x=found["x"],
+                    y=found["y"],
+                    button="left" if event != "mouseMoved" else "none",
+                    clickCount=1 if event != "mouseMoved" else 0,
+                )
+        time.sleep(0.35)
+        return True
+
+    def _dismiss_native_dialog(self) -> None:
+        """alert/confirm/beforeunload freeze the page; cancel them so observation can continue."""
+        if not getattr(self, "session", None):
+            return
+        try:
+            from browser_harness.helpers import _send
+
+            dialog = _send({"meta": "pending_dialog"}).get("dialog")
+            if not dialog:
+                return
+            self.call("Page.handleJavaScriptDialog", accept=False)
+            say(f"   ✕ dismissed a browser {dialog.get('type', 'dialog')}: "
+                f"{str(dialog.get('message', ''))[:60]!r}", "yellow")
+        except Exception as exc:
+            say(f"   ⚠ could not dismiss a browser dialog: {exc}", "dim")
 
     def fresh(self, page: dict[str, Any], action: dict[str, Any] | None = None):
         if action is not None and action.get("kind") in {"click", "select", "fill"}:

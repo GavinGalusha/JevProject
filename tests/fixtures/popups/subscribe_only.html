@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>news</title><link rel=stylesheet href=_base.css>
+<h1>News</h1><p>Article text</p>
+<div class=fixed-bg id=bg><div class=card role=dialog><h2>Subscribe to our newsletter</h2><p>Stay updated with our latest stories.</p>
+<button id=subscribe>Subscribe</button><button id=closesub>Close and subscribe</button></div></div>
+<script>window.__clicked=[];for(const b of document.querySelectorAll('button'))b.addEventListener('click',()=>window.__clicked.push(b.id));
+addEventListener('keydown',e=>{if(e.key==='Escape'){window.__clicked.push('ESC');document.getElementById('bg').remove()}})</script>

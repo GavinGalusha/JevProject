@@ -267,6 +267,18 @@ When a command finishes successfully, the page shows **★ SAVE THIS COMMAND**. 
 
 Saved commands appear as buttons on the page; tap **×** to delete one. They are stored in `saved_commands.json` in the project folder (override with `JEV_SAVED_COMMANDS_FILE`), which is gitignored. Fullscreen first tries the page's `<video>`, then falls back to the largest `<iframe>`, because embedded players are usually iframes.
 
+## Popups and interruptions
+
+Jev watches for things that get in the way and closes them before it decides its next step:
+
+- **In-page overlays** such as sign-in walls, cookie notices, newsletter and promo popups. It clicks only an unambiguous close control (X, Close, Dismiss, No thanks, Not now, Maybe later, Skip, Reject all). If an interruption has no such control, it presses Escape.
+- **Popup tabs** that Jev's tab opens onto a different website (typical ad pop-ups). They are closed and focus returns to Jev's tab.
+- **Native `alert()` / `confirm()` dialogs**, which would otherwise freeze the page.
+
+It never clicks Sign in, Join, Accept, Allow, Subscribe, Install, Buy or similar, and it leaves overlays the task itself opened (a date picker or passenger menu) alone. Each action prints a `✕` line in the server window. A page that is itself a login wall, with no overlay to close, still ends in a safe stop.
+
+Turn it off with `JEV_DISMISS_POPUPS=0`. To check it on this machine without any model calls, run `uv run python scripts/check_popups.py` (needs the dedicated Chrome from `uv run jev-remote`). The test pages are in `tests/fixtures/popups/`.
+
 ## Safe first test and kill switches
 
 For the first test, use a dedicated Chrome profile containing no saved payment information, email login, or password-manager access. Log into streaming services only after the public-site test succeeds.

@@ -1,0 +1,6 @@
+<!doctype html><meta charset=utf-8><title>stacked</title><link rel=stylesheet href=_base.css>
+<h1>Stacked</h1>
+<div id=consent style="position:fixed;bottom:0;left:0;right:0;background:#222;color:#fff;padding:16px;z-index:50">Cookie notice: we use cookies. <button id=nothanks>No thanks</button></div>
+<script>window.__clicked=[];document.getElementById('nothanks').addEventListener('click',()=>{window.__clicked.push('nothanks');document.getElementById('consent').remove();
+setTimeout(()=>{document.body.insertAdjacentHTML('beforeend','<div class=fixed-bg id=bg><div class=card role=dialog><button class=x aria-label=Close id=closenews>×</button><h2>Join our newsletter</h2><p>Stay in the loop.</p></div></div>');
+document.getElementById('closenews').addEventListener('click',()=>{window.__clicked.push('closenews');document.getElementById('bg').remove()})},50)})</script>
