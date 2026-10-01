@@ -1,0 +1,30 @@
+<!doctype html><meta charset=utf-8><title>Watch How I Met Your Mother (2005) TV Serie</title>
+<style>body{font-family:sans-serif;margin:0}#sesh{display:flex;gap:6px;padding:8px}
+#sesh button{padding:6px 14px}.seho{display:flex;gap:16px;padding:14px;border-bottom:1px solid #ddd;height:120px;box-sizing:border-box}
+.seep{width:90px}.sea{font-size:22px;display:block}h1{font-size:18px;margin:0}</style>
+<h2>How I Met Your Mother (2005)</h2><p>A father recounts to his children...</p>
+<div id=sesh></div><div id=list></div>
+<script>
+window.__clicked = [];
+const names = n => 'Title ' + n;
+function show(season) {
+  const sesh = document.getElementById('sesh'); sesh.innerHTML = '';
+  for (let s = 9; s >= 1; s--) {
+    const b = document.createElement('button'); b.dataset.season = s; b.textContent = s;
+    if (s === season) b.disabled = true;
+    b.addEventListener('click', () => { window.__clicked.push('season' + s); show(s); });
+    sesh.appendChild(b);
+  }
+  const list = document.getElementById('list'); list.innerHTML = '';
+  for (let e = 24; e >= 1; e--) {
+    const row = document.createElement('div'); row.className = 'seho';
+    const num = String(e).padStart(2, '0');
+    row.innerHTML = '<div class=seep><span class=sea> ' + num + '</span><span>Season ' + season +
+      '</span></div><div class=snfo><h1><a href="#s' + season + 'e' + e + '">' + names(e) +
+      '</a></h1><div class=date>March 31, 2014</div><p>Episode summary text.</p></div>';
+    row.querySelector('a').addEventListener('click', ev => { ev.preventDefault(); window.__clicked.push('s' + season + 'e' + e); });
+    list.appendChild(row);
+  }
+}
+show(5);   // the site remembers a different season on each visit; here it opens on season 5
+</script>

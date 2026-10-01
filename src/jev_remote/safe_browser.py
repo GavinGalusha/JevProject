@@ -10,6 +10,7 @@ from jev_ultrafast.browser import Browser, StalePage, fingerprint
 
 from .console import say
 from .player import (
+    FULLSCREEN_BUTTON_JS,
     MAX_PLAYER_CLICKS,
     MAX_PLAYER_REFRESHES,
     NOTE_GAVE_UP,
@@ -24,6 +25,13 @@ from .player import (
     videos_playing,
 )
 from .popups import OVERLAY_PROBE, popup_targets_to_close
+from .series import (
+    NOTE_ON_EPISODE,
+    on_episode_page,
+    relabel_js,
+    scroll_to_episode_js,
+    season_note,
+)
 
 _GUARD_FIELDS = (
     "node identity",
@@ -104,6 +112,7 @@ class StableTargetBrowser(Browser):
 
     # Set per run by the controller: playback goals wait for the player to appear.
     expect_player: bool = False
+    target_episode: tuple[int, int] | None = None  # (season, episode) named in the goal
     _player_waited_url: str | None = None
     _player_clicks: int = 0
     _player_refreshes: int = 0
@@ -173,12 +182,64 @@ class StableTargetBrowser(Browser):
                     announced = True
                 time.sleep(0.25)
 
+    def _scroll_to_target_episode(self) -> bool:
+        """Bring the requested episode's row into view; only rows in the viewport are observed."""
+        if not self.target_episode or not getattr(self, "session", None):
+            return False
+        try:
+            if self.evaluate(scroll_to_episode_js(*self.target_episode)):
+                say(
+                    f"   ↧ scrolled to Season {self.target_episode[0]} "
+                    f"Episode {self.target_episode[1]}",
+                    "dim",
+                )
+                time.sleep(0.25)
+                return True
+        except Exception:
+            pass  # best effort
+        return False
+
+    def _label_series_controls(self, page: dict[str, Any]) -> dict[str, Any]:
+        """Make season buttons and episode rows unambiguous, and say which season is showing."""
+        if not getattr(self, "session", None):
+            return page
+        actions = page.get("actions", [])
+        nodes = [a["node"] for a in actions if type(a.get("node")) is int]
+        if not nodes:
+            return page
+        try:
+            result = self.evaluate(relabel_js(nodes))
+        except Exception:
+            return page
+        if not isinstance(result, dict):
+            return page
+        labels = result.get("labels") or {}
+        changed = False
+        for action in actions:
+            new = labels.get(str(action.get("node")))
+            if new and action.get("label") != new:
+                action["label"] = new
+                changed = True
+        note = season_note(result.get("current_season"), self.target_episode)
+        if self.target_episode and on_episode_page(page.get("text", ""), self.target_episode):
+            season, episode = self.target_episode
+            note = NOTE_ON_EPISODE.format(season=season, episode=episode)
+        if note:
+            page["text"] = f"{page.get('text', '')}\n{note}".strip()
+            changed = True
+        if changed:
+            page["fingerprint"] = fingerprint(page)
+        return page
+
     def observe(self, screenshot: bool = True):
         page = self._observe_page(screenshot)
+        if self._scroll_to_target_episode():
+            page = self._observe_page(screenshot)  # the row is in view now; read it
         for _ in range(_POPUP_PASSES):
             if not self._clear_interruptions():
                 break
             page = self._observe_page(screenshot)
+        page = self._label_series_controls(page)
         page = self._with_video_player(page)
         if self._reload_requested:
             # The player would not start: refresh, then look at the page again from scratch.
@@ -224,18 +285,26 @@ class StableTargetBrowser(Browser):
             videos.extend(result.get("result", {}).get("value") or [])
         return videos if seen_frame else None
 
-    def _player_is_playing(self, found: dict[str, Any]) -> bool:
-        """Is something actually playing? Video clock first; pixels only if it cannot be read."""
+    def _player_is_playing(self, found: dict[str, Any], final: bool = False) -> bool:
+        """Is the requested video actually playing? Needs a moving video clock as proof.
+
+        Comparing pixels is only a last resort (``final``), for a player whose frame could never
+        be read: a spinner, an ad or a layout change moves pixels without any video playing.
+        """
+        min_duration = _milliseconds("JEV_PLAYER_MIN_DURATION_S", 120)
         try:
             first = self._read_videos(found)
             if first:
                 time.sleep(0.6)
                 second = self._read_videos(found) or []
-                return videos_playing(first, second)
-            # No readable <video> (not started, or nested out of reach): judge by the pixels.
+                return videos_playing(first, second, float(min_duration))
+            if first is not None or not final:
+                return False  # readable but no video yet, or not readable yet: not proven
         except Exception as exc:
-            say(f"   ⚠ could not read the video state ({exc}); comparing frames instead", "dim")
-        return self._frames_change(found.get("rect") or {})
+            say(f"   ⚠ could not read the video state ({exc})", "dim")
+            if not final:
+                return False
+        return self._frames_change(found.get("rect") or {}, samples=4, interval=0.8)
 
     def _video_loading(self, found: dict[str, Any]) -> bool:
         """A video told to play that has not buffered enough yet (big files take a while)."""
@@ -263,7 +332,7 @@ class StableTargetBrowser(Browser):
             loading = self._video_loading(found)
             limit = started + (buffering if loading else grace)
             if time.monotonic() >= limit:
-                return False
+                return self._player_is_playing(found, final=True)
             if not announced:
                 what = "buffering" if loading else "loading"
                 say(f"   ◷ the video is {what}; giving it a few seconds before judging", "dim")
@@ -347,6 +416,133 @@ class StableTargetBrowser(Browser):
             return None
         return x, y
 
+    def _is_fullscreen(self) -> bool:
+        try:
+            return bool(self.evaluate("!!document.fullscreenElement"))
+        except Exception:
+            return False
+
+    def _frame_eval(self, src: str | None, expression: str) -> list[Any]:
+        """Run an expression inside each matching cross-origin player frame; collect results."""
+        from browser_harness.helpers import cdp
+
+        host = urlparse(src or "").hostname
+        if not host:
+            return []
+        if self._frame_sessions is None:
+            self._frame_sessions = {}
+        results: list[Any] = []
+        for target in cdp("Target.getTargets").get("targetInfos", []):
+            if target.get("type") != "iframe" or urlparse(target.get("url", "")).hostname != host:
+                continue
+            session = self._frame_sessions.get(target["targetId"])
+            if session is None:
+                session = cdp("Target.attachToTarget", targetId=target["targetId"], flatten=True)[
+                    "sessionId"
+                ]
+                self._frame_sessions[target["targetId"]] = session
+            value = (
+                cdp(
+                    "Runtime.evaluate",
+                    session_id=session,
+                    expression=expression,
+                    returnByValue=True,
+                    awaitPromise=True,
+                    userGesture=True,
+                )
+                .get("result", {})
+                .get("value")
+            )
+            results.append(value)
+        return results
+
+    def _click_at(self, x: float, y: float) -> None:
+        for event in ("mouseMoved", "mousePressed", "mouseReleased"):
+            self.call(
+                "Input.dispatchMouseEvent",
+                type=event,
+                x=x,
+                y=y,
+                button="none" if event == "mouseMoved" else "left",
+                clickCount=0 if event == "mouseMoved" else 1,
+            )
+
+    def enter_fullscreen(self) -> bool:
+        """Fullscreen the player and confirm it. False means "not yet": the caller retries.
+
+        First the browser's own fullscreen API on the player element (with a user gesture), then
+        the player's own fullscreen button. A fullscreen that pauses the video is undone.
+        """
+        if self._is_fullscreen():
+            return True
+        try:
+            from browser_harness.helpers import cdp
+
+            cdp("Target.activateTarget", targetId=self.target)
+            self.call("Emulation.clearDeviceMetricsOverride")  # use the real screen size
+        except Exception:
+            pass
+        found = self._probe_player()
+        if not found:
+            say("   ⛶ fullscreen: no player found yet", "dim")
+            return False
+        node = found["node"]
+        attempts = (
+            ("browser fullscreen", None),
+            ("the player's fullscreen button", FULLSCREEN_BUTTON_JS),
+        )
+        for name, button_js in attempts:
+            try:
+                if button_js is None:
+                    outcome = self.call(
+                        "Runtime.evaluate",
+                        expression=(
+                            "(async () => { const e = window.__jevFast && "
+                            f"window.__jevFast.nodes.get({node}); if (!e) return 'missing'; "
+                            "try { await e.requestFullscreen({navigationUI: 'hide'}); "
+                            "return 'ok'; } catch (x) { return 'error: ' + x.message; } })()"
+                        ),
+                        returnByValue=True,
+                        awaitPromise=True,
+                        userGesture=True,
+                    )
+                    detail = outcome.get("result", {}).get("value")
+                else:
+                    offset = self.evaluate(
+                        f"(() => {{ const e = window.__jevFast.nodes.get({node}); "
+                        "const r = e.getBoundingClientRect(); return [r.x, r.y]; })()"
+                    )
+                    inside = next(
+                        (p for p in self._frame_eval(found.get("src"), button_js) if p), None
+                    )
+                    if not inside or not isinstance(offset, list):
+                        continue
+                    self._click_at(offset[0] + inside["x"], offset[1] + inside["y"])
+                    detail = "clicked"
+                time.sleep(1.0)
+                if self._is_fullscreen():
+                    say(f"   ⛶ fullscreen via {name}", "green")
+                    self._resume_if_paused(found)
+                    return True
+                say(f"   ⛶ {name} did not fullscreen ({detail})", "dim")
+            except Exception as exc:
+                say(f"   ⛶ {name} failed: {exc}", "dim")
+        return False
+
+    def _resume_if_paused(self, found: dict[str, Any]) -> None:
+        """Entering fullscreen must not leave the video paused."""
+        try:
+            videos = self._read_videos(found) or []
+            if any(v.get("paused") and not v.get("ended") for v in videos):
+                self._frame_eval(
+                    found.get("src"),
+                    "(() => { const v = document.querySelector('video'); "
+                    "if (v) v.play(); return true; })()",
+                )
+                say("   ▶ resumed playback after fullscreen", "dim")
+        except Exception:
+            pass
+
     def _leave_fullscreen(self) -> None:
         """A click that lands on a fullscreen control must not strand the run in fullscreen."""
         try:
@@ -361,7 +557,7 @@ class StableTargetBrowser(Browser):
         except Exception:
             pass
 
-    def _frames_change(self, rect: dict[str, Any]) -> bool:
+    def _frames_change(self, rect: dict[str, Any], samples: int = 3, interval: float = 0.5) -> bool:
         """True if the player's pixels change over ~1s, i.e. something is playing.
 
         A cross-origin iframe's video state cannot be read from the page, so look at the pixels.
@@ -376,12 +572,13 @@ class StableTargetBrowser(Browser):
                 "scale": 0.5,
             }
             frames = set()
-            for index in range(3):
+            for index in range(samples):
                 shot = self.call("Page.captureScreenshot", format="jpeg", quality=40, clip=clip)
                 frames.add(shot.get("data"))
-                if index < 2:
-                    time.sleep(0.5)
-            return len(frames) > 1
+                if index < samples - 1:
+                    time.sleep(interval)
+            # Sustained change (a video), not one jump (a spinner or layout shift).
+            return len(frames) >= max(3, samples - 1)
         except Exception:
             return False
 

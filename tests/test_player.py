@@ -294,26 +294,65 @@ def test_player_state_prefers_the_real_video_clock_over_pixels(monkeypatch):
     browser._frames_change.assert_not_called()
 
 
-def test_a_frame_with_no_readable_video_is_judged_by_its_pixels(monkeypatch):
-    # A video nested out of reach must not read as "not playing": that would make Jev pause it.
+def test_pixels_moving_never_count_as_playing_while_the_video_cannot_be_read():
+    # The goojara false positive: right after the click the player frame is not readable yet, a
+    # spinner/ad changes the picture, and that used to be reported as "now playing".
     browser = _browser(None)
-    browser._read_videos = Mock(return_value=[])
     browser._frames_change = Mock(return_value=True)
-    assert browser._player_is_playing(_player_probe()) is True
+    for unreadable in (None, []):
+        browser._read_videos = Mock(return_value=unreadable)
+        assert browser._player_is_playing(_player_probe()) is False
+    browser._frames_change.assert_not_called()
 
-    browser._frames_change = Mock(return_value=False)
-    assert browser._player_is_playing(_player_probe()) is False
 
-
-def test_pixels_are_only_the_fallback_when_the_video_cannot_be_read():
+def test_a_frame_that_never_became_readable_gets_one_strict_pixel_check_at_the_end():
     browser = _browser(None)
     browser._read_videos = Mock(return_value=None)
     browser._frames_change = Mock(return_value=True)
-    assert browser._player_is_playing(_player_probe()) is True
+    assert browser._player_is_playing(_player_probe(), final=True) is True
+    assert browser._frames_change.call_args.kwargs["samples"] >= 4
 
-    browser._read_videos = Mock(side_effect=RuntimeError("target gone"))
     browser._frames_change = Mock(return_value=False)
-    assert browser._player_is_playing(_player_probe()) is False
+    assert browser._player_is_playing(_player_probe(), final=True) is False
+
+
+def test_a_readable_frame_with_no_video_is_never_judged_by_pixels_even_at_the_end():
+    browser = _browser(None)
+    browser._read_videos = Mock(return_value=[])
+    browser._frames_change = Mock(return_value=True)
+    assert browser._player_is_playing(_player_probe(), final=True) is False
+    browser._frames_change.assert_not_called()
+
+
+def test_a_short_clip_is_an_ad_not_the_requested_video():
+    from jev_remote.player import videos_playing
+
+    ad = (
+        [{"paused": False, "ended": False, "t": 1.0, "d": 30.0}],
+        [{"paused": False, "t": 2.0, "d": 30.0}],
+    )
+    assert videos_playing(*ad) is False
+    episode = (
+        [{"paused": False, "ended": False, "t": 1.0, "d": 1320.0}],
+        [{"paused": False, "t": 2.0, "d": 1320.0}],
+    )
+    assert videos_playing(*episode) is True
+    live = (
+        [{"paused": False, "ended": False, "t": 1.0, "d": float("inf")}],
+        [{"paused": False, "t": 2.0, "d": float("inf")}],
+    )
+    assert videos_playing(*live) is True
+
+
+def test_the_frame_change_check_needs_sustained_motion_not_one_jump(monkeypatch):
+    monkeypatch.setattr("jev_remote.safe_browser.time.sleep", lambda _s: None)
+    rect = {"x": 0, "y": 84, "w": 900, "h": 500}
+    jump = _browser(None)
+    jump.call = Mock(side_effect=[{"data": "a"}, {"data": "b"}, {"data": "b"}, {"data": "b"}])
+    assert jump._frames_change(rect, samples=4) is False  # one layout shift, then still
+    moving = _browser(None)
+    moving.call = Mock(side_effect=[{"data": "a"}, {"data": "b"}, {"data": "c"}, {"data": "d"}])
+    assert moving._frames_change(rect, samples=4) is True
 
 
 def test_an_accidental_fullscreen_is_left_before_the_player_is_offered_again():

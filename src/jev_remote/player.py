@@ -47,7 +47,7 @@ PLAYER_PROBE = r"""(() => {
 
 # Reads the real <video> state inside a player frame (run in that frame, never in the page).
 VIDEO_STATE_JS = r"""(() => [...document.querySelectorAll('video')].map(v => ({
-  paused: v.paused, ended: v.ended, t: v.currentTime, ready: v.readyState,
+  paused: v.paused, ended: v.ended, t: v.currentTime, ready: v.readyState, d: v.duration,
 })))()"""
 
 
@@ -57,18 +57,25 @@ def inline_video_js(node: int) -> str:
         "(() => { const e = window.__jevFast && window.__jevFast.nodes.get(%d);"
         " if (!e) return null;"
         " const pick = d => [...d.querySelectorAll('video')].map(v => ({paused: v.paused,"
-        " ended: v.ended, t: v.currentTime, ready: v.readyState}));"
+        " ended: v.ended, t: v.currentTime, ready: v.readyState, d: v.duration}));"
         " if (e.tagName === 'VIDEO') return pick({querySelectorAll: () => [e]});"
         " try { return e.contentDocument ? pick(e.contentDocument) : null; }"
         " catch (x) { return null; } })()" % node
     )
 
 
-def videos_playing(first: list[dict], second: list[dict]) -> bool:
-    """True if any video is unpaused and its clock moved between two reads."""
+def videos_playing(first: list[dict], second: list[dict], min_duration: float = 120.0) -> bool:
+    """True if a real video is unpaused and its clock moved between two reads.
+
+    Clips shorter than ``min_duration`` seconds are treated as ads, not the requested title. A
+    live stream (infinite or unknown duration) counts.
+    """
     for before, after in zip(first, second, strict=False):
         if before.get("paused") or after.get("paused") or after.get("ended"):
             continue
+        duration = after.get("d")
+        if isinstance(duration, int | float) and 0 < duration < min_duration:
+            continue  # a pre-roll ad or a short clip, not the movie or episode
         if float(after.get("t", 0)) > float(before.get("t", 0)) + 0.15:
             return True
     return False
@@ -91,6 +98,23 @@ PLAYBACK_RULES = (
     "then, and never click a player that is already playing, because that would pause it. If the "
     "page text says it has not started yet, click the video player again."
 )
+
+# Runs inside the player frame: where is its own fullscreen button? Never clicks.
+FULLSCREEN_BUTTON_JS = r"""(() => {
+  const sel = '.vjs-fullscreen-control,.jw-icon-fullscreen,' +
+    '.plyr__control[data-plyr="fullscreen"],.ytp-fullscreen-button,.fullscreen,' +
+    '.fullscreen-button,.btn-fullscreen,#fullscreen,' +
+    'button[aria-label*="full" i],[role="button"][aria-label*="full" i],[title*="full" i],' +
+    '[class*="fullscreen" i]';
+  for (const e of document.querySelectorAll(sel)) {
+    if (!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
+    const r = e.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8 || r.right <= 0 || r.bottom <= 0) continue;
+    if (r.left >= innerWidth || r.top >= innerHeight) continue;
+    return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+  }
+  return null;
+})()"""
 
 NOTE_PLAYING = "[Jev] The video player is now playing. The playback goal is complete."
 NOTE_NOT_STARTED = (

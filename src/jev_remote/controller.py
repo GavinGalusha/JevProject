@@ -14,6 +14,7 @@ from .commands import ParsedCommand
 from .console import Heartbeat, say
 from .goal_refiner import GoalPlan, refine_goal
 from .player import is_playback_goal, with_playback_rules
+from .series import parse_episode_goal, with_series_rules
 from .vision_recovery import RecoveryAdvice, analyze_screenshot
 
 
@@ -80,6 +81,20 @@ VisionAnalyzer = Callable[
 GoalRefiner = Callable[[str, str | None], GoalPlan]
 
 
+def _flag_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
 def _default_agent_factory(url: str, goal: str) -> AgentLike:
     import jev_ultrafast.agent as agent_module
     from jev_ultrafast import Agent
@@ -90,6 +105,7 @@ def _default_agent_factory(url: str, goal: str) -> AgentLike:
     # sites. Agent.__init__ resolves Browser from its module globals when the instance is created.
     agent_module.Browser = StableTargetBrowser
     StableTargetBrowser.expect_player = is_playback_goal(goal)
+    StableTargetBrowser.target_episode = parse_episode_goal(goal)
 
     base_url = os.environ.get("TEXT_MODEL_BASE_URL", "").rstrip("/")
     if base_url == "https://api.openai.com/v1":
@@ -322,7 +338,7 @@ class RemoteController:
                             guided_plans=1,
                             updated_at=self._now(),
                         )
-                execution_goal = with_playback_rules(execution_goal)
+                execution_goal = with_series_rules(with_playback_rules(execution_goal))
                 new_agent = self.agent_factory(url, execution_goal)
                 with self._lock:
                     if self._active_job_id != job_id or cancel_event.is_set():
@@ -561,8 +577,11 @@ class RemoteController:
                 )
             if old_agent:
                 self._close_agent(old_agent, "previous browser tab")
-            if then_fullscreen and final == "done" and not limit_reason:
-                self._auto_fullscreen()
+            if final == "done" and not limit_reason and (
+                then_fullscreen
+                or (_flag_env("JEV_AUTO_FULLSCREEN", True) and is_playback_goal(execution_goal))
+            ):
+                self._schedule_fullscreen(new_agent, job_id)
         except Exception as exc:
             with self._lock:
                 stopped = self._stop_event.is_set()
@@ -704,6 +723,56 @@ class RemoteController:
                 "Check the connection and retry."
             )
         return detail or f"{type(exc).__name__} while running the command"
+
+    def _schedule_fullscreen(self, agent: AgentLike, job_id: int) -> None:
+        """Fullscreen the player shortly after playback starts, retrying until it sticks."""
+        threading.Thread(
+            target=self._fullscreen_when_ready,
+            args=(agent,),
+            name=f"jev-fullscreen-{job_id}",
+            daemon=True,
+        ).start()
+
+    def _still_current(self, agent: AgentLike) -> bool:
+        with self._lock:
+            return (
+                self._agent is agent
+                and self._active_job_id is None
+                and self._armed
+                and not self._stop_event.is_set()
+            )
+
+    def _wait_current(self, agent: AgentLike, seconds: float) -> bool:
+        """Sleep, but give up if a new command arrived or the remote was stopped."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if not self._still_current(agent):
+                return False
+            time.sleep(0.25)
+        return self._still_current(agent)
+
+    def _fullscreen_when_ready(self, agent: AgentLike) -> None:
+        delay = _float_env("JEV_FULLSCREEN_DELAY_S", 10.0)
+        gap = _float_env("JEV_FULLSCREEN_RETRY_S", 10.0)
+        attempts = max(1, int(_float_env("JEV_FULLSCREEN_ATTEMPTS", 4)))
+        enter = getattr(agent.browser, "enter_fullscreen", None)
+        for attempt in range(1, attempts + 1):
+            if not self._wait_current(agent, delay if attempt == 1 else gap):
+                return  # a newer command or STOP & LOCK took over
+            say(f"⛶  Fullscreen attempt {attempt}/{attempts}", "dim")
+            try:
+                if enter is not None:
+                    done = enter()
+                else:
+                    self._auto_fullscreen()
+                    return
+            except Exception as exc:
+                say(f"⚠  Fullscreen attempt failed — {exc}", "yellow")
+                done = False
+            if done:
+                say("⛶  Fullscreen ✔", "green")
+                return
+        say(f"⚠  Fullscreen did not take effect after {attempts} attempts", "yellow")
 
     def _auto_fullscreen(self) -> None:
         try:

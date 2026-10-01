@@ -168,6 +168,39 @@ def main() -> int:
             outcome,
         )
 
+        browser.call("Page.navigate", url=BASE + "series_page.html")
+        time.sleep(0.8)
+        browser.target_episode = (4, 6)
+        page = browser.observe(screenshot=False)
+        seasons = [a["label"] for a in page["actions"] if a["label"].startswith("Season")]
+        check(
+            "season buttons are labelled 'Season N' and the shown season is stated",
+            "Season 4" in seasons
+            and not any(a["label"].isdigit() for a in page["actions"])
+            and "currently shows Season 5" in page["text"],
+            f"{seasons} | {[line for line in page['text'].splitlines() if '[Jev]' in line]}",
+        )
+        pick = next(a for a in page["actions"] if a["label"] == "Season 4")
+        browser.act(pick, page)
+        time.sleep(0.6)
+        page = browser.observe(screenshot=False)
+        episode = [a for a in page["actions"] if a["label"].startswith("Season 4 Episode 6:")]
+        check(
+            "after choosing the season, episode 6 is scrolled into view and labelled",
+            len(episode) == 1 and "requested season" in page["text"],
+            str([a["label"] for a in page["actions"] if "Episode" in a["label"]][:4]),
+        )
+        if episode:
+            browser.act(episode[0], page)
+            time.sleep(0.4)
+            clicked = browser.evaluate("window.__clicked")
+            check(
+                "clicking it opens season 4 episode 6, with no further season clicks",
+                clicked == ["season4", "s4e6"],
+                str(clicked),
+            )
+        browser.target_episode = None
+
         browser.call("Page.navigate", url=BASE + "ad_popup.html")
         time.sleep(0.6)
         before = page_tabs()
