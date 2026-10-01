@@ -20,6 +20,7 @@ os.environ.setdefault("BU_CDP_URL", "http://127.0.0.1:9222")
 
 from browser_harness.helpers import cdp  # noqa: E402
 
+from jev_remote.player import PLAYER_LABEL  # noqa: E402
 from jev_remote.safe_browser import StableTargetBrowser  # noqa: E402
 
 FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "popups"
@@ -129,6 +130,21 @@ def main() -> int:
             pressed == [] and "Sign in" in controls(page),
             str(pressed),
         )
+
+        browser.call("Page.navigate", url=BASE + "player_page.html")
+        time.sleep(1.2)
+        page = browser.observe(screenshot=False)
+        offered = [a for a in page["actions"] if a["label"] == PLAYER_LABEL]
+        check("video player iframe is offered as a control", len(offered) == 1, str(controls(page)))
+        if offered:
+            browser.act(offered[0], page)  # the real safety path: freshness, hit-test, click
+            time.sleep(0.8)
+            clicked = browser.evaluate("window.__clicked")
+            check(
+                "clicking it presses play inside the player, not a Direct Link",
+                clicked == ["player-played"],
+                str(clicked),
+            )
 
         browser.call("Page.navigate", url=BASE + "ad_popup.html")
         time.sleep(0.6)

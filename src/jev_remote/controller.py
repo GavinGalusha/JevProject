@@ -13,6 +13,7 @@ from .budget import RequestBudget
 from .commands import ParsedCommand
 from .console import Heartbeat, say
 from .goal_refiner import GoalPlan, refine_goal
+from .player import is_playback_goal, with_playback_rules
 from .vision_recovery import RecoveryAdvice, analyze_screenshot
 
 
@@ -88,6 +89,7 @@ def _default_agent_factory(url: str, goal: str) -> AgentLike:
     # Keep the audited Jev action machinery, but avoid page-wide false invalidations on dynamic
     # sites. Agent.__init__ resolves Browser from its module globals when the instance is created.
     agent_module.Browser = StableTargetBrowser
+    StableTargetBrowser.expect_player = is_playback_goal(goal)
 
     base_url = os.environ.get("TEXT_MODEL_BASE_URL", "").rstrip("/")
     if base_url == "https://api.openai.com/v1":
@@ -320,6 +322,7 @@ class RemoteController:
                             guided_plans=1,
                             updated_at=self._now(),
                         )
+                execution_goal = with_playback_rules(execution_goal)
                 new_agent = self.agent_factory(url, execution_goal)
                 with self._lock:
                     if self._active_job_id != job_id or cancel_event.is_set():

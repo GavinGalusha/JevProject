@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from jev_ultrafast.browser import Browser, StalePage, fingerprint
 
 from .console import say
+from .player import PLAYER_LABEL, PLAYER_PROBE
 from .popups import OVERLAY_PROBE, popup_targets_to_close
 
 _GUARD_FIELDS = (
@@ -88,6 +89,10 @@ class StableTargetBrowser(Browser):
     disconnected, hidden, disabled, or otherwise invalid targets immediately before input.
     """
 
+    # Set per run by the controller: playback goals wait for the player to appear.
+    expect_player: bool = False
+    _player_waited_url: str | None = None
+
     def __init__(self, url: str):
         super().__init__(url)
         try:
@@ -158,6 +163,48 @@ class StableTargetBrowser(Browser):
             if not self._clear_interruptions():
                 break
             page = self._observe_page(screenshot)
+        return self._with_video_player(page)
+
+    def _with_video_player(self, page: dict[str, Any]) -> dict[str, Any]:
+        """Offer the embedded player as a control; the upstream reader skips iframes."""
+        if os.environ.get("JEV_PLAYER_ACTION", "1").strip().lower() in {"0", "false", "no"}:
+            return page
+        if not getattr(self, "session", None):
+            return page
+        try:
+            found = self.evaluate(PLAYER_PROBE)
+            url = page.get("url")
+            if not found and self.expect_player and url != self._player_waited_url:
+                # Players are usually injected a moment after load; wait once per page for it.
+                self._player_waited_url = url
+                deadline = time.monotonic() + _milliseconds("JEV_PLAYER_WAIT_MS", 1500) / 1000
+                while not found and time.monotonic() < deadline:
+                    time.sleep(0.25)
+                    found = self.evaluate(PLAYER_PROBE)
+        except Exception:
+            return page  # best effort: the normal controls are still usable
+        if not isinstance(found, dict) or type(found.get("node")) is not int:
+            return page
+        actions = page.get("actions", [])
+        if any(action.get("node") == found["node"] for action in actions):
+            return page
+        player = {
+            "id": "e_player",
+            "node": found["node"],
+            "kind": "click",
+            "role": "button",
+            "label": PLAYER_LABEL,
+            "value": "",
+            "rect": found.get("rect") or {},
+        }
+        # Keep the real controls first; scroll/wait pseudo-actions stay at the end.
+        at = next(
+            (i for i, a in enumerate(actions) if a.get("kind") in {"scroll", "wait"}), len(actions)
+        )
+        page["actions"] = [*actions[:at], player, *actions[at:]]
+        page.setdefault("guards", {})[str(found["node"])] = found.get("guard")
+        page["fingerprint"] = fingerprint(page)
+        say(f"   ▶ offering the page's video player ({found.get('tag')}) as a control", "dim")
         return page
 
     def _observe_page(self, screenshot: bool = True):
