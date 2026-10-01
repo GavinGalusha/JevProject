@@ -292,6 +292,19 @@ Embedded players are cross-origin iframes, which the page reader normally cannot
 
 `scripts/check_popups.py` exercises this against local test pages, including a player that fires an ad on the first click. Set `JEV_PLAYER_ACTION=0` to turn the player control off.
 
+## After every command
+
+Each new command starts clean, whether the last one finished or failed:
+
+1. The previous tab closes first, which stops its video and leaves fullscreen.
+2. The browser connection is renewed (only Jev's helper process restarts; Chrome is untouched).
+3. Chrome is reopened if it was closed.
+4. The command starts from `JEV_START_URL`, not from the page the last command ended on. Set `JEV_CONTINUE_FROM_CURRENT_PAGE=1` to continue from the current page instead.
+
+If the browser connection still looks stale, Jev refreshes it and retries the command once. `JEV_REFRESH_PER_COMMAND=0` skips the connection refresh. `JEV_DEBUG=1` prints full tracebacks in the server window.
+
+After a successful playback command, Jev waits about 10 seconds, fullscreens the player and checks that it really is fullscreen, retrying every 10 seconds (up to 4 attempts, `JEV_AUTO_FULLSCREEN=0` to disable). A new command or STOP & LOCK cancels it.
+
 ## Safe first test and kill switches
 
 For the first test, use a dedicated Chrome profile containing no saved payment information, email login, or password-manager access. Log into streaming services only after the public-site test succeeds.

@@ -95,6 +95,50 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _no_chrome() -> str | None:
+    return None
+
+
+def _no_reset() -> None:
+    return None
+
+
+def _default_connection_reset() -> None:
+    """Stop the browser-harness helper so the next command starts a fresh connection to Chrome.
+
+    Only the helper process stops; Chrome and its tabs are untouched.
+    """
+    from browser_harness.admin import restart_daemon
+
+    restart_daemon()
+
+
+_STALE_CONNECTION_HINTS = (
+    "Session with given id not found",
+    "No target with given id",
+    "didn't come up",
+    "timed out waiting for the daemon",
+    "daemon-starting",
+    "WebSocket",
+    "Connection refused",
+    "Broken pipe",
+)
+
+
+def _looks_stale(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(hint in text for hint in _STALE_CONNECTION_HINTS)
+
+
+def _default_chrome_ensurer() -> str | None:
+    """Make sure the dedicated Chrome is running, reopening it if it was closed."""
+    if not _flag_env("JEV_AUTO_LAUNCH_CHROME", True):
+        return None
+    from .chrome import ensure_chrome
+
+    return ensure_chrome()
+
+
 def _default_agent_factory(url: str, goal: str) -> AgentLike:
     import jev_ultrafast.agent as agent_module
     from jev_ultrafast import Agent
@@ -131,8 +175,21 @@ class RemoteController:
         vision_analyzer: VisionAnalyzer = analyze_screenshot,
         goal_refiner: GoalRefiner = refine_goal,
         max_stale_decisions: int | None = None,
+        chrome_ensurer: Callable[[], str | None] | None = None,
+        connection_reset: Callable[[], None] | None = None,
     ):
         self.start_url = start_url
+        # Only the real browser path needs Chrome; test doubles must never launch one.
+        if chrome_ensurer is None:
+            chrome_ensurer = (
+                _default_chrome_ensurer if agent_factory is _default_agent_factory else _no_chrome
+            )
+        self.chrome_ensurer = chrome_ensurer
+        if connection_reset is None:
+            connection_reset = (
+                _default_connection_reset if agent_factory is _default_agent_factory else _no_reset
+            )
+        self.connection_reset = connection_reset
         self.budget = budget or RequestBudget()
         self.agent_factory = agent_factory
         self._lock = threading.RLock()
@@ -281,7 +338,11 @@ class RemoteController:
         try:
             with self._lock:
                 previous = self._agent
-                url = start_url or self._current_url(previous) or self.start_url
+                # Every new command starts from the start page, not from wherever the last one
+                # ended (an episode page, say). JEV_CONTINUE_FROM_CURRENT_PAGE=1 opts back in.
+                url = start_url or self.start_url
+                if not start_url and _flag_env("JEV_CONTINUE_FROM_CURRENT_PAGE", False):
+                    url = self._current_url(previous) or self.start_url
 
             say(f"▶  NEW COMMAND: {goal}", "cyan", rule=True)
             modes = [
@@ -339,7 +400,14 @@ class RemoteController:
                             updated_at=self._now(),
                         )
                 execution_goal = with_series_rules(with_playback_rules(execution_goal))
-                new_agent = self.agent_factory(url, execution_goal)
+                if _flag_env("JEV_REFRESH_PER_COMMAND", True):
+                    # A clean slate for every command: the old tab (and its video/fullscreen)
+                    # goes first, then the browser connection is renewed.
+                    progress["what"] = "refreshing the browser connection"
+                    self._retire_previous_tab(None)
+                    self._reset_browser_connection()
+                self._ensure_chrome(job_id, progress)
+                new_agent = self._create_agent(url, execution_goal)
                 with self._lock:
                     if self._active_job_id != job_id or cancel_event.is_set():
                         return
@@ -349,6 +417,7 @@ class RemoteController:
                     say("■  Stopped before it began (STOP & LOCK)", "yellow")
                     return
                 self._activate(new_agent)
+                self._retire_previous_tab(new_agent)
                 progress["what"] = "reading the page"
                 last_state: dict[str, Any] = {}
                 limit_reason: str | None = None
@@ -601,6 +670,10 @@ class RemoteController:
                     )
             if not stopped and current:
                 say(f"✖  ERROR after {elapsed()}s — {type(exc).__name__}: {exc}", "red")
+                if _flag_env("JEV_DEBUG", False):
+                    import traceback
+
+                    say(traceback.format_exc(), "dim")
         finally:
             with self._lock:
                 if self._running_agent is new_agent:
@@ -707,7 +780,10 @@ class RemoteController:
         try:
             agent.close()
         except Exception as exc:
-            say(f"⚠  Could not close {label} — {exc}", "yellow")
+            if "No target with given id" in str(exc) or "Session with given id" in str(exc):
+                say(f"   ({label} was already closed)", "dim")
+            else:
+                say(f"⚠  Could not close {label} — {exc}", "yellow")
 
     @staticmethod
     def _friendly_error(exc: Exception) -> str:
@@ -723,6 +799,49 @@ class RemoteController:
                 "Check the connection and retry."
             )
         return detail or f"{type(exc).__name__} while running the command"
+
+    def _ensure_chrome(self, job_id: int, progress: dict[str, Any]) -> None:
+        """Reopen the dedicated Chrome if it was closed, before opening a tab in it."""
+        progress["what"] = "checking the browser"
+        try:
+            outcome = self.chrome_ensurer()
+        except Exception as exc:
+            raise RuntimeError(f"Chrome could not be reopened: {exc}") from exc
+        if outcome and outcome.startswith("Launched"):
+            say("↻  Chrome was closed; reopened it", "yellow")
+            with self._lock:
+                if self._active_job_id == job_id:
+                    self._status.update(
+                        message="Chrome was closed; reopened it. Starting…",
+                        updated_at=self._now(),
+                    )
+
+    def _reset_browser_connection(self) -> None:
+        try:
+            self.connection_reset()
+        except Exception as exc:  # best effort: ensure_daemon() repairs a stale helper anyway
+            say(f"⚠  Could not refresh the browser connection — {exc}", "yellow")
+
+    def _create_agent(self, url: str, goal: str) -> AgentLike:
+        """Open the Jev tab; if the browser connection went stale, refresh it and retry once."""
+        try:
+            return self.agent_factory(url, goal)
+        except Exception as exc:
+            if not _looks_stale(exc):
+                raise
+            say("↻  The browser connection looked stale; refreshing it and retrying", "yellow")
+            self._reset_browser_connection()
+            self._ensure_chrome(-1, {})
+            return self.agent_factory(url, goal)
+
+    def _retire_previous_tab(self, new_agent: AgentLike | None) -> None:
+        """A new command replaces the old tab at once: stops its video, leaves its fullscreen."""
+        with self._lock:
+            old = self._agent
+            if old is None or old is new_agent:
+                return
+            self._agent = None
+        self._close_agent(old, "previous browser tab")
 
     def _schedule_fullscreen(self, agent: AgentLike, job_id: int) -> None:
         """Fullscreen the player shortly after playback starts, retrying until it sticks."""
