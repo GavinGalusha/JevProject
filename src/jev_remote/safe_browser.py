@@ -11,9 +11,12 @@ from jev_ultrafast.browser import Browser, StalePage, fingerprint
 from .console import say
 from .player import (
     MAX_PLAYER_CLICKS,
+    MAX_PLAYER_REFRESHES,
     NOTE_GAVE_UP,
     NOTE_NOT_STARTED,
     NOTE_PLAYING,
+    NOTE_REFRESHED,
+    PLAY_BUTTON_JS,
     PLAYER_LABEL,
     PLAYER_PROBE,
     VIDEO_STATE_JS,
@@ -103,6 +106,9 @@ class StableTargetBrowser(Browser):
     expect_player: bool = False
     _player_waited_url: str | None = None
     _player_clicks: int = 0
+    _player_refreshes: int = 0
+    _player_last_click_at: float = 0.0
+    _reload_requested: bool = False
     _frame_sessions: dict[str, str] | None = None
 
     def __init__(self, url: str):
@@ -116,9 +122,7 @@ class StableTargetBrowser(Browser):
     @staticmethod
     def _filter_actions(page: dict[str, Any], *, announce: bool = True) -> dict[str, Any]:
         actions = page.get("actions", [])
-        fill_nodes = {
-            action.get("node") for action in actions if action.get("kind") == "fill"
-        }
+        fill_nodes = {action.get("node") for action in actions if action.get("kind") == "fill"}
         filtered: list[str] = []
         kept: list[dict[str, Any]] = []
         for action in actions:
@@ -175,7 +179,13 @@ class StableTargetBrowser(Browser):
             if not self._clear_interruptions():
                 break
             page = self._observe_page(screenshot)
-        return self._with_video_player(page)
+        page = self._with_video_player(page)
+        if self._reload_requested:
+            # The player would not start: refresh, then look at the page again from scratch.
+            self._reload_requested = False
+            self._reload_page()
+            page = self._with_video_player(self._observe_page(screenshot))
+        return page
 
     def _read_videos(self, found: dict[str, Any]) -> list[dict[str, Any]] | None:
         """The real <video> state behind the player, or None if it cannot be read.
@@ -218,15 +228,124 @@ class StableTargetBrowser(Browser):
         """Is something actually playing? Video clock first; pixels only if it cannot be read."""
         try:
             first = self._read_videos(found)
-            if first is not None:
-                if not first:
-                    return False  # the player frame exists but has no <video> yet
+            if first:
                 time.sleep(0.6)
                 second = self._read_videos(found) or []
                 return videos_playing(first, second)
+            # No readable <video> (not started, or nested out of reach): judge by the pixels.
         except Exception as exc:
             say(f"   ⚠ could not read the video state ({exc}); comparing frames instead", "dim")
         return self._frames_change(found.get("rect") or {})
+
+    def _video_loading(self, found: dict[str, Any]) -> bool:
+        """A video told to play that has not buffered enough yet (big files take a while)."""
+        try:
+            videos = self._read_videos(found) or []
+        except Exception:
+            return False
+        return any(
+            not v.get("paused") and not v.get("ended") and v.get("ready", 4) < 3 for v in videos
+        )
+
+    def _wait_until_playing(self, found: dict[str, Any]) -> bool:
+        """Give the player time to load after a click before judging that it has not started.
+
+        A few seconds always; much longer while a video is visibly buffering, since a large file
+        can take a while and clicking it again would only pause it.
+        """
+        started = self._player_last_click_at or time.monotonic()
+        grace = _milliseconds("JEV_PLAYER_LOAD_WAIT_MS", 8000) / 1000
+        buffering = _milliseconds("JEV_PLAYER_BUFFER_WAIT_MS", 25000) / 1000
+        announced = False
+        while True:
+            if self._player_is_playing(found):
+                return True
+            loading = self._video_loading(found)
+            limit = started + (buffering if loading else grace)
+            if time.monotonic() >= limit:
+                return False
+            if not announced:
+                what = "buffering" if loading else "loading"
+                say(f"   ◷ the video is {what}; giving it a few seconds before judging", "dim")
+                announced = True
+            time.sleep(0.5)
+
+    def _reload_page(self) -> None:
+        """Refresh the page: players sometimes wedge on a blank frame or a failed ad."""
+        say("   ↻ refreshing the page: the video player did not start", "yellow")
+        self.call("Page.reload", ignoreCache=True)
+        deadline = time.monotonic() + 15
+        time.sleep(0.5)
+        while time.monotonic() < deadline:
+            try:
+                if self.evaluate("document.readyState") == "complete":
+                    break
+            except Exception:
+                pass  # still navigating
+            time.sleep(0.2)
+        self._player_clicks = 0
+        self._player_waited_url = None  # wait for the player to load again
+
+    def _play_button_point(self, node: int, src: str | None) -> tuple[float, float] | None:
+        """Page coordinates of the play button inside the player frame, if it has one."""
+        rect = self.evaluate(
+            "(() => { const e = window.__jevFast && window.__jevFast.nodes.get(%d); if (!e) "
+            "return null; const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, "
+            "r.height]; })()" % node
+        )
+        if not isinstance(rect, list) or len(rect) != 4:
+            return None
+        inside = None
+        same_origin = self.evaluate(
+            "(() => { const e = window.__jevFast.nodes.get(%d); try { return e.contentWindow && "
+            "e.contentDocument ? (%s) : null; } catch (x) { return null; } })()"
+            % (
+                node,
+                PLAY_BUTTON_JS.replace("document.", "e.contentDocument.")
+                .replace("innerWidth", "e.contentWindow.innerWidth")
+                .replace("innerHeight", "e.contentWindow.innerHeight"),
+            )
+        )
+        if isinstance(same_origin, dict):
+            inside = same_origin
+        else:
+            from browser_harness.helpers import cdp
+
+            host = urlparse(src or "").hostname
+            for target in cdp("Target.getTargets").get("targetInfos", []) if host else []:
+                if (
+                    target.get("type") != "iframe"
+                    or urlparse(target.get("url", "")).hostname != host
+                ):
+                    continue
+                session = (self._frame_sessions or {}).get(target["targetId"])
+                if session is None:
+                    session = cdp(
+                        "Target.attachToTarget", targetId=target["targetId"], flatten=True
+                    )["sessionId"]
+                    self._frame_sessions = {
+                        **(self._frame_sessions or {}),
+                        target["targetId"]: session,
+                    }
+                found = (
+                    cdp(
+                        "Runtime.evaluate",
+                        session_id=session,
+                        expression=PLAY_BUTTON_JS,
+                        returnByValue=True,
+                    )
+                    .get("result", {})
+                    .get("value")
+                )
+                if isinstance(found, dict):
+                    inside = found
+                    break
+        if not inside:
+            return None
+        x, y = rect[0] + inside["x"], rect[1] + inside["y"]
+        if not (rect[0] <= x <= rect[0] + rect[2] and rect[1] <= y <= rect[1] + rect[3]):
+            return None
+        return x, y
 
     def _leave_fullscreen(self) -> None:
         """A click that lands on a fullscreen control must not strand the run in fullscreen."""
@@ -297,10 +416,20 @@ class StableTargetBrowser(Browser):
         note = None
         offer = True
         if self._player_clicks or found.get("playing"):
-            if found.get("playing") or self._player_is_playing(found):
+            if found.get("playing") or self._wait_until_playing(found):
                 note, offer = NOTE_PLAYING, False  # never offer a playing player: a click pauses it
             elif self._player_clicks >= MAX_PLAYER_CLICKS:
-                note, offer = NOTE_GAVE_UP.format(clicks=self._player_clicks), False
+                if self._player_refreshes < MAX_PLAYER_REFRESHES:
+                    self._player_refreshes += 1
+                    self._reload_requested = True
+                    note = NOTE_REFRESHED
+                else:
+                    note, offer = (
+                        NOTE_GAVE_UP.format(
+                            clicks=self._player_clicks, refreshes=self._player_refreshes
+                        ),
+                        False,
+                    )
             else:
                 note = NOTE_NOT_STARTED.format(clicks=self._player_clicks)
                 if found.get("fullscreen"):
@@ -316,6 +445,7 @@ class StableTargetBrowser(Browser):
                 "role": "button",
                 "label": PLAYER_LABEL,
                 "value": "",
+                "src": found.get("src") or "",
                 "rect": found.get("rect") or {},
             }
             # Keep the real controls first; scroll/wait pseudo-actions stay at the end.
@@ -413,6 +543,16 @@ class StableTargetBrowser(Browser):
             raise StalePage("Target changed or is covered. Observe again.")
 
         x, y = target["x"], target["y"]
+        if action.get("id") == "e_player":
+            try:
+                button = self._play_button_point(node, action.get("src"))
+            except Exception:
+                button = None  # fall back to the centre of the player
+            if button:
+                x, y = button
+                say("   ◎ clicking the player's play button", "dim")
+            else:
+                say("   ◎ no play button found; clicking the centre of the player", "dim")
         confirmed = self.evaluate(
             """(({node,x,y}) => {
               const e=window.__jevFast?.nodes.get(node),hit=document.elementFromPoint(x,y);
@@ -439,6 +579,7 @@ class StableTargetBrowser(Browser):
         self.after_input = action
         if action.get("id") == "e_player":
             self._player_clicks += 1
+            self._player_last_click_at = time.monotonic()
         return {"executed": action["id"]}
 
     # ----- Interruptions: popup tabs, in-page overlays and native dialogs -----
@@ -516,8 +657,11 @@ class StableTargetBrowser(Browser):
             if not dialog:
                 return
             self.call("Page.handleJavaScriptDialog", accept=False)
-            say(f"   ✕ dismissed a browser {dialog.get('type', 'dialog')}: "
-                f"{str(dialog.get('message', ''))[:60]!r}", "yellow")
+            say(
+                f"   ✕ dismissed a browser {dialog.get('type', 'dialog')}: "
+                f"{str(dialog.get('message', ''))[:60]!r}",
+                "yellow",
+            )
         except Exception as exc:
             say(f"   ⚠ could not dismiss a browser dialog: {exc}", "dim")
 

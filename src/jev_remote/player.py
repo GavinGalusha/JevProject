@@ -81,14 +81,15 @@ _MARKER = "Playback rules:"
 
 PLAYBACK_RULES = (
     f"{_MARKER} once the movie or episode page is open and a video player is visible, click the "
-    "video player itself to start playback. Do not open 'Direct Links', download, mirror, "
-    "external-host or other server links, and do not leave the episode page while its player is "
-    "visible. If this looks like a movie or episode page but no video player is offered yet, "
-    "WAIT for it to load instead of opening other links. Players often need more than one click "
-    "(the first can just wake the player or trigger an ad). The task is complete only when the "
-    "page text says the video player is playing: choose DONE then, and never click a player that "
-    "is already playing, because that would pause it. If the page text says it has not started "
-    "yet, click the video player again."
+    "video player itself to start playback: its play button if one is visible, otherwise the "
+    "centre of the player. Do not open 'Direct Links', download, mirror, external-host or other "
+    "server links, and do not leave the episode page while its player is visible. If this looks "
+    "like a movie or episode page but no video player is offered yet, WAIT for it to load instead "
+    "of opening other links. Players often need more than one click (the first can just wake the "
+    "player or trigger an ad), and Jev refreshes the page itself if the player will not start. "
+    "The task is complete only when the page text says the video player is playing: choose DONE "
+    "then, and never click a player that is already playing, because that would pause it. If the "
+    "page text says it has not started yet, click the video player again."
 )
 
 NOTE_PLAYING = "[Jev] The video player is now playing. The playback goal is complete."
@@ -96,8 +97,32 @@ NOTE_NOT_STARTED = (
     "[Jev] The video player has not started playing yet (clicked {clicks} time(s) so far). "
     "Click the video player again."
 )
-NOTE_GAVE_UP = "[Jev] The video player did not start playing after {clicks} clicks."
-MAX_PLAYER_CLICKS = 4
+NOTE_GAVE_UP = (
+    "[Jev] The video player did not start playing after {clicks} clicks and {refreshes} page "
+    "refresh(es)."
+)
+NOTE_REFRESHED = (
+    "[Jev] The page was refreshed because the video player did not start. Click the video "
+    "player to start playback."
+)
+MAX_PLAYER_CLICKS = 4  # per page load; then refresh the page
+MAX_PLAYER_REFRESHES = 2
+
+# Runs inside the player frame: where is its own play button? Never clicks.
+PLAY_BUTTON_JS = r"""(() => {
+  const sel = '.vjs-big-play-button,.jw-icon-display,.plyr__control--overlaid,' +
+    '.ytp-large-play-button,.play-button,.play_button,.btn-play,.play,#play,' +
+    'button[aria-label*="play" i],' +
+    '[role="button"][aria-label*="play" i],[class*="big-play" i],[title*="play" i]';
+  for (const e of document.querySelectorAll(sel)) {
+    if (!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
+    const r = e.getBoundingClientRect();
+    if (r.width < 12 || r.height < 12 || r.right <= 0 || r.bottom <= 0) continue;
+    if (r.left >= innerWidth || r.top >= innerHeight) continue;
+    return {x: r.x + r.width / 2, y: r.y + r.height / 2};
+  }
+  return null;
+})()"""
 
 
 def with_playback_rules(goal: str) -> str:

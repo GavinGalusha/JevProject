@@ -279,6 +279,19 @@ It never clicks Sign in, Join, Accept, Allow, Subscribe, Install, Buy or similar
 
 Turn it off with `JEV_DISMISS_POPUPS=0`. To check it on this machine without any model calls, run `uv run python scripts/check_popups.py` (needs the dedicated Chrome from `uv run jev-remote`). The test pages are in `tests/fixtures/popups/`.
 
+## Video players
+
+Embedded players are cross-origin iframes, which the page reader normally cannot see. Jev adds the player as a control (**Video player — click to start playback**) and, for playback requests, follows these rules:
+
+- **Click the play button inside the player, or the centre of the player if it has none.** It never opens "Direct Links", download or mirror links instead.
+- **Prove it is playing.** Jev reads the real `<video>` clock inside the player frame (playing means it is unpaused and its time is moving). If that cannot be read, it compares frames. The command is only finished once the page says the player is playing, and a playing player is never clicked again, since that would pause it.
+- **Give it time to load.** After a click it waits a few seconds (`JEV_PLAYER_LOAD_WAIT_MS`) and much longer while a video is visibly buffering (`JEV_PLAYER_BUFFER_WAIT_MS`), so a large file is not mistaken for a failure.
+- **Click again if needed.** Players often need two or three clicks (the first can only wake the player or fire an ad). Ad popup tabs are closed automatically.
+- **Refresh if it will not start.** After 4 clicks without playback it reloads the page and tries again, up to 2 times, then stops with a message.
+- **Leave accidental fullscreen** when a click lands on a fullscreen control without starting playback.
+
+`scripts/check_popups.py` exercises this against local test pages, including a player that fires an ad on the first click. Set `JEV_PLAYER_ACTION=0` to turn the player control off.
+
 ## Safe first test and kill switches
 
 For the first test, use a dedicated Chrome profile containing no saved payment information, email login, or password-manager access. Log into streaming services only after the public-site test succeeds.
