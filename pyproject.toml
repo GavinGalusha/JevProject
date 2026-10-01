@@ -5,6 +5,7 @@ description = "A LAN-only phone remote for a Jev-controlled living-room browser"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "cryptography>=43",
   "fastapi>=0.116,<1",
   "jev-ultrafast @ git+https://github.com/browser-use/jev-ultrafast.git@main",
   "python-dotenv>=1.1,<2",

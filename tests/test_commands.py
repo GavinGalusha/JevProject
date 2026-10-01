@@ -31,3 +31,11 @@ def test_complex_play_request_is_not_mistaken_for_media_play():
 def test_empty_command_is_rejected():
     with pytest.raises(ValueError):
         parse_command("   ")
+
+
+def test_spoken_punctuation_and_case_still_match_direct_controls():
+    assert parse_command("Pause.").action == "pause"
+    assert parse_command("  Volume up!  ").action == "volume"
+    seek = parse_command("Back 30 seconds.")
+    assert seek.action == "seek" and seek.amount == -30
+    assert parse_command("Find Apollo 11, please.").kind == "jev"

@@ -16,7 +16,8 @@ class ParsedCommand:
 
 
 def parse_command(raw: str) -> ParsedCommand:
-    text = " ".join(raw.strip().lower().split())
+    # Speech recognition adds punctuation ("Pause.", "Volume up!"), so ignore it when matching.
+    text = " ".join(re.sub(r"[^\w\s]", " ", raw.lower()).split())
     if not text:
         raise ValueError("Command cannot be empty")
 

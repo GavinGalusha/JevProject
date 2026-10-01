@@ -118,7 +118,7 @@ You should see a line such as `Launched Chrome (profile ...) at http://127.0.0.1
 ### 6. Open the remote and test
 
 - On the same computer: <http://127.0.0.1:8787>
-- On a phone on the same Wi-Fi: `http://<Mac-LAN-IP>:8787`. Find the address with `ipconfig getifaddr en0`.
+- On a phone on the same Wi-Fi: `https://<Mac-LAN-IP>:8787`. Find the address with `ipconfig getifaddr en0`.
 
 On a phone, pair instead of typing the long token. When the server starts it prints a QR code and an 8-character pairing code (for example `A59A-F869`). Scan the QR code with the phone's camera, or open the address and type the code into the prompt. The code works once, expires after 15 minutes, and is locked after 5 wrong guesses; restart `uv run jev-remote` for a new one. On this computer, you can still paste `JEV_REMOTE_TOKEN` directly.
 
@@ -186,7 +186,7 @@ Copy-Item .env.example .env
 uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
 
-Paste the generated value into `JEV_REMOTE_TOKEN` in `.env`. Add the same TypeSafe key used during milestone 1 and an OpenAI API key. Jev Remote uses `gpt-5-nano` by default for its small text-entry helper. Set `JEV_START_URL` to your streaming service's home page after the Google test works.
+Paste the generated value into `JEV_REMOTE_TOKEN` in `.env`. Add the same TypeSafe key used during milestone 1 and an OpenAI API key. Jev Remote uses `gpt-5-mini` by default for its small text-entry helper. Set `JEV_START_URL` to your streaming service's home page after the Google test works.
 
 Start the server:
 
@@ -196,13 +196,18 @@ uv run jev-remote
 
 Starting the server does not launch Jev or touch Chrome. It waits for an authenticated command.
 
-Find the PC's LAN address with `ipconfig`. On a phone connected to the same Wi-Fi, open `http://<PC-LAN-IP>:8787`, for example `http://192.168.1.50:8787`. Paste `JEV_REMOTE_TOKEN` when prompted.
+Find the PC's LAN address with `ipconfig`. On a phone connected to the same Wi-Fi, open `https://<PC-LAN-IP>:8787`, for example `https://192.168.1.50:8787`. Paste `JEV_REMOTE_TOKEN` when prompted.
 
 Windows may ask whether Python can accept connections. Allow it only on **Private networks**. Do not enable Public networks.
 
 ### Voice support
 
-The page uses the phone browser's built-in Speech Recognition API. Support varies by browser, and some phones block microphone features on plain HTTP pages. Typed commands and all remote buttons still work. HTTPS or a native wrapper can be added after the Chrome/streaming experiment proves reliable.
+Phones only allow the microphone on secure pages, so Jev Remote serves **HTTPS** by default with a self-signed certificate it generates itself in `.tls/` (gitignored). The first time you open the page, the phone warns that the certificate is not trusted: choose **Advanced** (or **Show details**), then proceed to the address. After that, tap **Tap to speak**, allow the microphone, and talk. It sends when you stop talking, or tap again to send early.
+
+- Open the page with `https://`, for example `https://192.168.1.50:8787`. The QR code already does this.
+- The certificate is reissued automatically if the PC's LAN address changes. Phones may warn again then.
+- Set `JEV_HTTPS=0` in `.env` to go back to plain `http://`. Voice will then only work on this computer.
+- Speech recognition support varies by phone browser (Chrome on Android and Safari on iPhone generally work). Typed commands and all remote buttons always work.
 
 The token is stored in the phone browser's local storage. LAN HTTP does not encrypt traffic, so use this only on a trusted home network. Pairing and local HTTPS are sensible next security milestones.
 

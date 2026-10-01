@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#111111">
     <title>Jev Remote</title>
-    <link rel="stylesheet" href="/assets/styles.css">
+    <link rel="stylesheet" href="/assets/styles.css?v=6">
   </head>
   <body>
     <main class="remote">
@@ -16,11 +16,11 @@
       </header>
 
       <section class="voice-section">
-        <button id="speak" class="speak" aria-label="Speak a command">
-          <span class="mic">●</span>
-          <span>HOLD TO SPEAK</span>
+        <button type="button" id="speak" class="speak" aria-label="Speak a command">
+          <span class="mic-dot" aria-hidden="true">🎤</span>
+          <span id="speak-label">Tap to speak</span>
         </button>
-        <p id="voice-help" class="hint">Or type a command below</p>
+        <p id="voice-help" class="hint" aria-live="polite">Or type a command below</p>
       </section>
 
       <form id="command-form" autocomplete="off">
@@ -88,6 +88,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/assets/app.js" defer></script>
+    <script src="/assets/app.js?v=6" defer></script>
   </body>
 </html>

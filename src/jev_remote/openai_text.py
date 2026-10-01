@@ -43,7 +43,7 @@ def _post(body: dict[str, Any]) -> dict[str, Any]:
 
 def field_text(context: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Generate one field value using direct OpenAI Chat Completions."""
-    model = os.environ.get("TEXT_MODEL", "gpt-5-nano")
+    model = os.environ.get("TEXT_MODEL", "gpt-5-mini")
     started = time.perf_counter()
     result = _post(
         {

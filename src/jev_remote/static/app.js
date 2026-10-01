@@ -36,7 +36,7 @@ async function refreshStatus() {
 let lastJevCommand = null;
 
 async function sendCommand(text, extra = {}) {
-  if (!token) { tokenDialog.showModal(); return; }
+  if (!token) { tokenDialog.showModal(); return { ok: false, message: "Enter your access token first" }; }
   showStatus("working", `Sending “${text}”…`);
   try {
     const result = await api("/api/command", { method: "POST", body: JSON.stringify({ text, ...extra }) });
@@ -44,8 +44,11 @@ async function sendCommand(text, extra = {}) {
     $("#save-command").hidden = true;
     showStatus(result.state, result.message);
     if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 1000);
+    document.querySelector(".status-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return { ok: true };
   } catch (error) {
     showStatus("error", error.message);
+    return { ok: false, message: error.message };
   }
 }
 
@@ -117,34 +120,82 @@ if (pairFromLink) {
 const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 if (Recognition) {
   const recognition = new Recognition();
+  const speakLabel = $("#speak-label");
+  const help = $("#voice-help");
+  const SILENCE_MS = 1200; // phone browsers can wait a long time to finalize, so stop after a short pause
   let listening = false;
+  let heard = "";
+  let sent = false;
+  let silenceTimer = null;
+  let resetTimer = null;
   recognition.continuous = false;
-  recognition.interimResults = false;
+  recognition.interimResults = true;
   recognition.lang = "en-US";
-  const start = (event) => {
-    event.preventDefault();
-    if (listening) return;
-    listening = true;
-    speakButton.classList.add("listening");
-    recognition.start();
+  const setButton = (state) => {
+    speakButton.classList.toggle("listening", state === "listening");
+    speakButton.setAttribute("aria-pressed", String(state === "listening"));
+    speakLabel.textContent = {
+      idle: "Tap to speak",
+      listening: "Listening… tap to send",
+      sending: "Sending…",
+      sent: "Sent ✓ — tap to speak again",
+    }[state];
   };
-  const stop = (event) => {
-    event.preventDefault();
-    if (listening) recognition.stop();
+  const submitHeard = async () => {
+    clearTimeout(silenceTimer);
+    const text = heard.trim();
+    if (sent || !text) return;
+    sent = true;
+    setButton("sending");
+    help.textContent = `Sending: “${text}”`;
+    const { ok, message } = await sendCommand(text);
+    help.textContent = ok ? `Sent: “${text}”` : `“${text}” didn't run: ${message}`;
+    setButton(ok ? "sent" : "idle");
+    clearTimeout(resetTimer);
+    if (ok) resetTimer = setTimeout(() => { if (!listening) setButton("idle"); }, 4000);
   };
-  speakButton.addEventListener("pointerdown", start);
-  speakButton.addEventListener("pointerup", stop);
-  speakButton.addEventListener("pointercancel", stop);
-  recognition.addEventListener("result", (event) => sendCommand(event.results[0][0].transcript));
-  recognition.addEventListener("end", () => { listening = false; speakButton.classList.remove("listening"); });
+  // Tap once to start; it sends after you stop talking, or tap again to send early.
+  speakButton.addEventListener("click", () => {
+    if (listening) { recognition.stop(); return; }
+    clearTimeout(resetTimer);
+    heard = "";
+    sent = false;
+    help.textContent = "Listening… start talking";
+    try { recognition.start(); listening = true; setButton("listening"); } catch (error) { showStatus("error", `Voice input: ${error.message}`); }
+  });
+  recognition.addEventListener("result", (event) => {
+    heard = Array.from(event.results).map((r) => r[0].transcript).join(" ");
+    help.textContent = `Hearing: “${heard}”`;
+    clearTimeout(silenceTimer);
+    if (Array.from(event.results).every((r) => r.isFinal)) submitHeard();
+    else silenceTimer = setTimeout(() => recognition.stop(), SILENCE_MS);
+  });
+  recognition.addEventListener("end", () => {
+    listening = false;
+    clearTimeout(silenceTimer);
+    if (heard.trim() && !sent) { submitHeard(); return; }
+    if (!sent) { setButton("idle"); help.textContent = "Didn't catch anything. Tap and try again, or type below."; }
+  });
   recognition.addEventListener("error", (event) => {
     listening = false;
-    speakButton.classList.remove("listening");
-    showStatus("error", `Voice input: ${event.error}`);
+    clearTimeout(silenceTimer);
+    if (event.error === "no-speech" || event.error === "aborted") return;
+    setButton("idle");
+    const blocked = "Microphone blocked. Allow it for this site in your browser settings, then reload.";
+    const reasons = {
+      "not-allowed": blocked,
+      "service-not-allowed": blocked,
+      "network": "Speech service unreachable. Check the phone's internet connection.",
+      "audio-capture": "No microphone found.",
+    };
+    const message = reasons[event.error] || `Voice input: ${event.error}`;
+    help.textContent = message;
+    showStatus("error", message);
   });
 } else {
-  speakButton.disabled = true;
-  $("#voice-help").textContent = "Voice recognition is unavailable here; type a command below.";
+  const unavailable = "Voice input isn't available in this browser. Type a command below.";
+  $("#voice-help").textContent = unavailable;
+  speakButton.addEventListener("click", () => { showStatus("error", unavailable); $("#command").focus(); });
 }
 
 if (pairFromLink) { /* pairing in progress */ } else if (!token) tokenDialog.showModal(); else refreshStatus();

@@ -13,11 +13,11 @@ def test_openai_key_is_mapped_to_jev_settings(monkeypatch):
     configure_text_model()
     assert os.environ["TEXT_MODEL_API_KEY"] == "secret"
     assert os.environ["TEXT_MODEL_BASE_URL"] == "https://api.openai.com/v1"
-    assert os.environ["TEXT_MODEL"] == "gpt-5-nano"
+    assert os.environ["TEXT_MODEL"] == "gpt-5-mini"
 
 
 def test_openai_helper_uses_low_cost_chat_parameters(monkeypatch):
-    monkeypatch.setenv("TEXT_MODEL", "gpt-5-nano")
+    monkeypatch.setenv("TEXT_MODEL", "gpt-5-mini")
     response = {
         "choices": [{"message": {"content": '{"text":"How I Met Your Mother"}'}}],
         "usage": {"total_tokens": 24},
@@ -26,7 +26,7 @@ def test_openai_helper_uses_low_cost_chat_parameters(monkeypatch):
         value, details = field_text({"goal": "Find the show"})
 
     body = post.call_args.args[0]
-    assert body["model"] == "gpt-5-nano"
+    assert body["model"] == "gpt-5-mini"
     assert body["reasoning_effort"] == "minimal"
     assert body["response_format"] == {"type": "json_object"}
     assert value == "How I Met Your Mother"
