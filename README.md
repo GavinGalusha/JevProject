@@ -292,6 +292,14 @@ Embedded players are cross-origin iframes, which the page reader normally cannot
 
 `scripts/check_popups.py` exercises this against local test pages, including a player that fires an ad on the first click. Set `JEV_PLAYER_ACTION=0` to turn the player control off.
 
+## No browser on the TV (kiosk mode)
+
+`uv run jev-remote` starts the dedicated Chrome with `--kiosk`, so no tab bar, address bar or window frame is ever drawn, and with the crash-restore and "controlled by automation" bubbles switched off. It opens on a blank page, and Jev's pages fill the real screen size instead of a fixed 1120x780 box.
+
+- Launch flags only apply when Chrome **starts**. If the dedicated Chrome is already running from before, quit it once (the next command or `uv run jev-remote` reopens it in kiosk mode).
+- To leave kiosk mode on the PC: `Alt+F4` (Windows) or `Cmd+Q` (Mac) closes that Chrome. STOP & LOCK only closes Jev's tabs.
+- On a development laptop, set `JEV_KIOSK=0` in `.env` to get a normal window again. `JEV_FIXED_VIEWPORT=1` keeps the old fixed viewport.
+
 ## After every command
 
 Each new command starts clean, whether the last one finished or failed:

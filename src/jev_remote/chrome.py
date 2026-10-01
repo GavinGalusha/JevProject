@@ -21,8 +21,31 @@ def cdp_alive(cdp_url: str) -> bool:
         return False
 
 
+def kiosk_enabled() -> bool:
+    return os.environ.get("JEV_KIOSK", "1").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def chrome_flags(port: int, profile: Path) -> list[str]:
+    """Launch flags for the dedicated Chrome: debuggable, quiet, and (by default) UI-less."""
+    flags = [
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--noerrdialogs",
+        "--disable-infobars",
+        "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",
+    ]
+    if kiosk_enabled():
+        # No tab strip, address bar or window frame: nothing of Chrome shows on the TV.
+        flags.append("--kiosk")
+    # Open on a blank page instead of Chrome's new-tab page (and its search box).
+    return [*flags, "about:blank"]
+
+
 def chrome_command(port: int, profile: Path) -> list[str]:
-    flags = [f"--remote-debugging-port={port}", f"--user-data-dir={profile}"]
+    flags = chrome_flags(port, profile)
     if sys.platform == "darwin":
         return ["open", "-na", "Google Chrome", "--args", *flags]
     if sys.platform == "win32":

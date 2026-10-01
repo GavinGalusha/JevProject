@@ -108,3 +108,16 @@ def test_popup_check_failure_never_ends_the_run():
     browser.evaluate.side_effect = RuntimeError("devtools went away")
     with patch.object(StableTargetBrowser, "_close_popup_tabs", return_value=False):
         assert browser._clear_interruptions() is False
+
+
+def test_a_kiosk_window_uses_the_real_screen_size_unless_a_fixed_viewport_is_requested(monkeypatch):
+    from jev_remote.safe_browser import _use_real_viewport
+
+    monkeypatch.delenv("JEV_KIOSK", raising=False)
+    monkeypatch.delenv("JEV_FIXED_VIEWPORT", raising=False)
+    assert _use_real_viewport() is True
+    monkeypatch.setenv("JEV_FIXED_VIEWPORT", "1")
+    assert _use_real_viewport() is False
+    monkeypatch.delenv("JEV_FIXED_VIEWPORT")
+    monkeypatch.setenv("JEV_KIOSK", "0")
+    assert _use_real_viewport() is False

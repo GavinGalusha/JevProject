@@ -424,3 +424,13 @@ def test_video_loading_means_told_to_play_but_not_buffered_yet():
     assert browser._video_loading(_player_probe()) is False
     browser._read_videos = Mock(side_effect=RuntimeError("gone"))
     assert browser._video_loading(_player_probe()) is False
+
+
+def test_a_playing_ad_counts_as_still_loading_so_it_is_not_clicked_again():
+    browser = _browser(None)
+    ad = [{"paused": False, "ended": False, "ready": 4, "d": 20.0}]
+    browser._read_videos = Mock(return_value=ad)
+    assert browser._video_loading(_player_probe()) is True
+    movie = [{"paused": False, "ended": False, "ready": 4, "d": 2700.0}]
+    browser._read_videos = Mock(return_value=movie)
+    assert browser._video_loading(_player_probe()) is False

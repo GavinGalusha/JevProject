@@ -64,6 +64,14 @@ def _is_google_page(url: Any) -> bool:
 _POPUP_PASSES = 3  # an overlay can reveal another one (consent, then newsletter)
 
 
+def _use_real_viewport() -> bool:
+    """Kiosk windows fill the screen; keep the fixed test viewport only if asked for."""
+    from .chrome import kiosk_enabled
+
+    fixed = os.environ.get("JEV_FIXED_VIEWPORT", "").strip().lower() in {"1", "true", "yes"}
+    return kiosk_enabled() and not fixed
+
+
 def _milliseconds(name: str, default: int) -> int:
     try:
         return max(0, int(os.environ.get(name, "").strip() or default))
@@ -127,6 +135,13 @@ class StableTargetBrowser(Browser):
             self.call("Page.enable")
         except Exception as exc:
             say(f"   ⚠ could not watch for browser dialogs: {exc}", "dim")
+        if _use_real_viewport():
+            try:
+                # Upstream forces a 1120x780 viewport. On a kiosk TV that would draw the page as a
+                # small box on a blank screen, so let the page use the real screen size.
+                self.call("Emulation.clearDeviceMetricsOverride")
+            except Exception:
+                pass
 
     @staticmethod
     def _filter_actions(page: dict[str, Any], *, announce: bool = True) -> dict[str, Any]:
@@ -307,14 +322,23 @@ class StableTargetBrowser(Browser):
         return self._frames_change(found.get("rect") or {}, samples=4, interval=0.8)
 
     def _video_loading(self, found: dict[str, Any]) -> bool:
-        """A video told to play that has not buffered enough yet (big files take a while)."""
+        """Told to play but not there yet: still buffering, or a short ad is playing first.
+
+        Either way the right move is to wait; clicking again would pause the ad or the video.
+        """
+        min_duration = float(_milliseconds("JEV_PLAYER_MIN_DURATION_S", 120))
         try:
             videos = self._read_videos(found) or []
         except Exception:
             return False
-        return any(
-            not v.get("paused") and not v.get("ended") and v.get("ready", 4) < 3 for v in videos
-        )
+        for video in videos:
+            if video.get("paused") or video.get("ended"):
+                continue
+            duration = video.get("d")
+            short = isinstance(duration, int | float) and 0 < duration < min_duration
+            if video.get("ready", 4) < 3 or short:
+                return True
+        return False
 
     def _wait_until_playing(self, found: dict[str, Any]) -> bool:
         """Give the player time to load after a click before judging that it has not started.

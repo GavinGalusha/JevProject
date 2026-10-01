@@ -30,3 +30,25 @@ def test_ensure_chrome_refuses_remote_endpoint(monkeypatch):
     monkeypatch.setattr(chrome, "cdp_alive", lambda url: False)
     with pytest.raises(RuntimeError):
         chrome.ensure_chrome()
+
+
+def test_launch_flags_use_kiosk_and_silence_bubbles_by_default(monkeypatch, tmp_path):
+    monkeypatch.delenv("JEV_KIOSK", raising=False)
+    flags = chrome.chrome_flags(9222, tmp_path / "p")
+    assert "--kiosk" in flags
+    for quiet in ("--noerrdialogs", "--disable-infobars", "--hide-crash-restore-bubble"):
+        assert quiet in flags
+    assert "--remote-debugging-port=9222" in flags
+    assert flags[-1] == "about:blank"  # open on a blank page, not Chrome's new-tab page
+
+
+def test_kiosk_can_be_turned_off(monkeypatch, tmp_path):
+    monkeypatch.setenv("JEV_KIOSK", "0")
+    flags = chrome.chrome_flags(9222, tmp_path / "p")
+    assert "--kiosk" not in flags and "--remote-debugging-port=9222" in flags
+
+
+def test_the_launch_command_carries_the_flags(monkeypatch, tmp_path):
+    monkeypatch.delenv("JEV_KIOSK", raising=False)
+    command = chrome.chrome_command(9222, tmp_path / "p")
+    assert "--kiosk" in command and "--remote-debugging-port=9222" in command
