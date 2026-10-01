@@ -32,7 +32,7 @@ uv downloads Python 3.12 or newer on its own if needed. You do not need to insta
 You also need two API keys:
 
 - **TypeSafe** (`TYPESAFE_API_KEY`): Jev's decision model, called on every browser step.
-- **OpenAI** (`OPENAI_API_KEY`): only used to write text for form fields, such as a search query.
+- **OpenAI** (`OPENAI_API_KEY`): writes text for form fields and powers optional Guided and Vision Recovery modes.
 
 ### 2. Clone and install
 
@@ -67,12 +67,49 @@ Safety caps on paid API calls (defaults shown; `0` disables a cap):
 | Variable | Default | Limits |
 |---|---|---|
 | `JEV_MAX_STEPS_PER_COMMAND` | `25` | Jev (TypeSafe) steps in a single command |
+| `JEV_MAX_STALE_DECISIONS` | `6` | Consecutive predictions discarded because the page changed |
 | `JEV_MAX_JEV_CALLS_PER_HOUR` | `200` | TypeSafe calls across all commands in a rolling hour |
-| `JEV_MAX_OPENAI_CALLS_PER_HOUR` | `50` | OpenAI text-helper calls in a rolling hour |
+| `JEV_MAX_OPENAI_CALLS_PER_HOUR` | `50` | OpenAI text, guided-planning, and vision calls in a rolling hour |
+| `JEV_PAGE_SETTLE_TIMEOUT_MS` | `1500` | Maximum adaptive wait after browser input |
+| `JEV_PAGE_SETTLE_QUIET_MS` | `150` | Interval required for two stable semantic snapshots |
+| `JEV_COMMAND_TIMEOUT_SECONDS` | `180` | Maximum total time for one browser task |
+| `JEV_STALL_TIMEOUT_SECONDS` | `45` | Maximum time without a completed Jev step |
 
-When a cap is hit, the running command stops with a message on the page, and new commands are refused until the hour window frees up. Caps reset when the server restarts. Media buttons make no API calls and are never limited.
+`JEV_MAX_STEPS_PER_COMMAND` counts browser actions that actually executed, while the terminal separately reports every TypeSafe prediction. A prediction can be discarded if a dynamic page changes before Jev can safely act. After `JEV_MAX_STALE_DECISIONS` consecutive discarded predictions, Jev either invokes enabled Vision Recovery or stops with a specific stale-page error instead of spending the full action budget.
+
+When a cap is hit, the running command stops with a message on the page, and new commands are refused until the hour window frees up. A timed-out or stalled task is marked as an error, its owned tab is closed, and the remote accepts a retry. Review the TV before retrying because the last browser action may have completed before a timeout. Caps reset when the server restarts. Media buttons make no API calls and are never limited.
 
 Optional: set `JEV_PRICE_INPUT_PER_1M` and `JEV_PRICE_OUTPUT_PER_1M` (USD per million tokens) to print a cost estimate for each command.
+
+### Optional guided mode
+
+Turn on **GUIDED MODE** under the command box when a longer request would benefit from a clearer plan. Before Jev opens a new tab, OpenAI makes one structured planning call using `JEV_GUIDED_MODEL` (default `gpt-5-mini`). It converts the request into an objective, requirements, success criteria, and constraints. It does not see the page or a screenshot, and its output cannot directly operate Chrome. Jev still observes the page and chooses every browser action.
+
+Guided Mode is off by default and counts as one call against `JEV_MAX_OPENAI_CALLS_PER_HOUR`. It preserves the user's requested authority: the planner is explicitly prohibited from adding purchases, sign-ups, messages, downloads, account changes, permission grants, or warning bypasses. If an essential ambiguity remains, the command stops before opening a new tab and shows a clarifying question. Set `JEV_GUIDED_MODEL` in `.env` to choose another OpenAI model.
+
+The terminal prints the complete guided plan—including its objective, requirements, success criteria, constraints, clarification state, model, and token usage—before Jev starts acting. During execution, `model N` lines show every TypeSafe prediction and `step N` lines show only actions that actually reached Chrome. Page-change retries, sanitized navigation URLs, field-text helper calls, models, latency, confidence, and token counts are logged separately. API keys, cookies, screenshot contents, query strings, and URL fragments are never printed.
+
+### Optional vision recovery mode
+
+Turn on **VISION RECOVERY** under the command box when a site is difficult for the normal structured loop. The default loop still sends no screenshots. If Jev reaches `blocked` or enters a repeated stale-page prediction loop, recovery captures one low-detail screenshot of the dedicated Jev tab and sends it to OpenAI using `JEV_VISION_MODEL` (default `gpt-5-nano`). The response is advisory context only: Jev re-observes the DOM and still chooses from validated controls, so vision output never becomes coordinates, selectors, JavaScript, or a direct browser action.
+
+The screenshot can contain anything visible in the dedicated Chrome tab. Leave the switch off for sensitive pages. Recovery runs at most once per command, counts against `JEV_MAX_OPENAI_CALLS_PER_HOUR`, and does not run for a network request that is simply hung; the watchdog handles infrastructure stalls. Set `JEV_VISION_MODEL` in `.env` to use another vision-capable OpenAI model.
+
+### Stale-page action safety
+
+Jev never executes a model-selected action merely because its label still looks plausible. Every decision is bound to an observed state. Immediately before input, Jev verifies the document/navigation identity and a code-generated semantic guard for the retained DOM node. It then requires the node to still be connected, enabled, visible, inside the viewport, and uncovered at its center point. Fill targets are checked before text generation and again after the text-model request returns. The model cannot supply selectors or coordinates; it can only select an ID from the current observation.
+
+The action-time navigation identity deliberately excludes unrelated form values, scroll position, viewport dimensions, and volatile surrounding-container text. Dynamic sites such as Google can change those values continuously even while the selected result remains unchanged. Such page-wide churn no longer vetoes a valid target. A full navigation, SPA URL change, removed/replaced node, changed target label or role, changed destination, changed target state, disabled state, overlay, or coverage still rejects the action.
+
+Editable fields expose only their meaningful `FILL` action. Jev's generated `CLICK Open Search`-style duplicate for the same node is removed before the model sees the action space; focusing and typing already happen atomically as part of `FILL`.
+
+On Google pages, the global **Google Apps** launcher is also excluded from the action space. It is browser-site chrome rather than a search-result action and was repeatedly distracting the decision model. This filter is hostname-scoped and does not hide controls with the same label on unrelated sites.
+
+After an action, Jev waits adaptively for the filtered semantic action set and its retained node identities to remain unchanged across two samples. The default samples are 150 ms apart with a 1.5-second total cap. This gives navigation and client-side rendering time to replace transient controls before another model request begins, without imposing a fixed delay on already-stable pages. The terminal reports either `page settled` or `page settle cap reached` for every post-input wait.
+
+For clicks, Jev validates the selected node and then checks the center plus eight interior points. It uses the first point whose live hit-tested element is the selected node or one of its descendants, verifies that point again immediately before input, and otherwise refuses the click. This handles large result links whose geometric center is covered without permitting clicks outside the model-selected element.
+
+If any check fails, the decision is consumed without input, the old node reference is discarded, and Jev takes a fresh observation before asking for another decision. The terminal marks this as `prediction not executed`, while `/api/status` reports the cumulative `stale_rejections` count. The project pins the audited Jev commit in `pyproject.toml`, and dependency-contract tests verify that stale actions remain rejected when dependencies are updated deliberately.
 
 ### 4. Start the dedicated Chrome profile
 
@@ -113,6 +150,14 @@ You should see Chrome's version JSON, then something like `{'url': 'about:blank'
 uv run jev-remote
 ```
 
+HTTPS is the default. For temporary testing with typed commands over plain HTTP, run:
+
+```sh
+uv run jev-remote --http
+```
+
+Use `uv run jev-remote --https` to explicitly override `JEV_HTTPS=0`. HTTP does not provide phone microphone access and sends the remote token and commands without transport encryption, so use it only briefly on a trusted LAN.
+
 You should see a line such as `Launched Chrome (profile ...) at http://127.0.0.1:9222` or `Chrome already running at ...`, then `Uvicorn running on http://0.0.0.0:8787`. The server prints nothing else until you send a command, and it does not touch Chrome until then. Leave the terminal open. Each command then logs its goal, every Jev step with token usage, and a summary line.
 
 ### 6. Open the remote and test
@@ -131,10 +176,11 @@ Then follow [Safe first test and kill switches](#safe-first-test-and-kill-switch
 - **Configuration error about `JEV_REMOTE_TOKEN`:** the token must be at least 32 characters.
 - **401 from the API:** the token pasted into the page does not match `.env`. Use the gear icon to re-enter it.
 - **"No Jev-controlled media tab exists yet":** the direct buttons (play, pause, seek, volume) only work after a Jev command has opened a tab.
+- **Task stopped without progress:** the watchdog closed the stalled tab. Review the TV, then retry with a more specific command. Increase `JEV_STALL_TIMEOUT_SECONDS` only if your model requests normally take longer than 45 seconds.
 
 ### How a command flows
 
-Exact phrases such as `pause`, `mute`, `fullscreen`, `volume up` and `back 30` are matched with a regex and run as JavaScript on the current video: instant, with no API call. Anything else goes to Jev, which loops over observing the page, asking TypeSafe which element to use next, and acting in Chrome. OpenAI is called only when Jev needs text to type into a field.
+Exact phrases such as `pause`, `mute`, `fullscreen`, `volume up` and `back 30` are matched with a regex and run as JavaScript on the current video: instant, with no API call. Anything else goes to Jev, which loops over observing the page, asking TypeSafe which element to use next, and acting in Chrome. OpenAI writes text for fields; it also makes one planning call when Guided Mode is enabled and can analyze one screenshot when Vision Recovery is enabled and Jev becomes blocked.
 
 ## Setup (Windows)
 

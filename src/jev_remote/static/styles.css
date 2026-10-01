@@ -28,6 +28,12 @@ label { display: block; margin: 0 0 8px 4px; color: var(--muted); font-size: .65
 .command-row { display: flex; border: 1px solid var(--line); border-radius: 15px; background: var(--panel); overflow: hidden; }
 .command-row input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: white; padding: 17px; }
 .command-row button { width: 58px; border: 0; background: var(--orange); color: white; font-size: 1.6rem; }
+.command-row button:disabled { opacity: .45; cursor: wait; }
+.mode-toggle { display: flex; align-items: flex-start; gap: 10px; margin: 11px 4px 0; letter-spacing: 0; }
+.mode-toggle input { margin-top: 2px; accent-color: var(--orange); }
+.mode-toggle span, .mode-toggle small { display: block; }
+.mode-toggle strong { color: #ddd; font-size: .68rem; letter-spacing: .1em; }
+.mode-toggle small { margin-top: 3px; color: var(--muted); font-size: .68rem; font-weight: 500; }
 .status-card { display: flex; align-items: center; gap: 13px; min-height: 78px; margin: 14px 0 22px; padding: 15px 17px; border: 1px solid var(--line); border-radius: 15px; background: #111; }
 .status-card strong { font-size: .86rem; }
 .status-card p { color: var(--muted); font-size: .76rem; margin: 4px 0 0; }

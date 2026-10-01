@@ -14,10 +14,10 @@ def _int_env(name: str, default: int) -> int:
 
 
 class RequestBudget:
-    """Caps on paid API calls: per command, and per rolling hour for TypeSafe and OpenAI.
+    """Caps executed browser actions per command and paid calls per rolling hour.
 
-    A limit of 0 disables that cap. Calls are counted when a Jev step completes, so a step's
-    internal retries are not counted.
+    A limit of 0 disables that cap. Every completed or discarded TypeSafe prediction counts
+    toward the hourly Jev limit, while only browser actions count toward the command step limit.
     """
 
     WINDOW = 3600.0

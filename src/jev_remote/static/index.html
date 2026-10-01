@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#111111">
     <title>Jev Remote</title>
-    <link rel="stylesheet" href="/assets/styles.css?v=6">
+    <link rel="stylesheet" href="/assets/styles.css?v=9">
   </head>
   <body>
     <main class="remote">
@@ -29,6 +29,14 @@
           <input id="command" name="command" placeholder="Play How I Met Your Mother" maxlength="2000">
           <button type="submit" aria-label="Send command">→</button>
         </div>
+        <label class="mode-toggle">
+          <input id="guided-mode" type="checkbox">
+          <span><strong>GUIDED MODE</strong><small>Let OpenAI clarify the goal before Jev starts</small></span>
+        </label>
+        <label class="mode-toggle">
+          <input id="vision-recovery" type="checkbox">
+          <span><strong>VISION RECOVERY</strong><small>Send one screenshot to OpenAI only if Jev gets blocked</small></span>
+        </label>
       </form>
 
       <section class="status-card" aria-live="polite">
@@ -88,6 +96,6 @@
         </div>
       </form>
     </dialog>
-    <script src="/assets/app.js?v=6" defer></script>
+    <script src="/assets/app.js?v=9" defer></script>
   </body>
 </html>

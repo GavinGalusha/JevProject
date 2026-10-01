@@ -11,8 +11,15 @@ class FakeController:
     def status(self):
         return {"state": "idle", "message": "Ready"}
 
-    def submit(self, command, start_url=None, then_fullscreen=False):
-        self.received.append((command, start_url, then_fullscreen))
+    def submit(
+        self,
+        command,
+        start_url=None,
+        then_fullscreen=False,
+        vision_recovery=False,
+        guided=False,
+    ):
+        self.received.append((command, start_url, then_fullscreen, vision_recovery, guided))
         return {"state": "working", "message": "Accepted"}
 
     def close(self):
@@ -113,4 +120,26 @@ def test_command_passes_start_url_and_fullscreen():
         headers={"Authorization": f"Bearer {TOKEN}"},
         json={"text": "Play a show", "start_url": "https://example.com/", "fullscreen": True},
     )
-    assert controller.received[0][1:] == ("https://example.com/", True)
+    assert controller.received[0][1:] == ("https://example.com/", True, False, False)
+
+
+def test_command_passes_vision_recovery_mode():
+    controller = FakeController()
+    client = TestClient(create_app(Settings(token=TOKEN), controller))
+    client.post(
+        "/api/command",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={"text": "Play a show", "vision_recovery": True},
+    )
+    assert controller.received[0][3] is True
+
+
+def test_command_passes_guided_mode():
+    controller = FakeController()
+    client = TestClient(create_app(Settings(token=TOKEN), controller))
+    client.post(
+        "/api/command",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={"text": "Play a show", "guided": True},
+    )
+    assert controller.received[0][4] is True

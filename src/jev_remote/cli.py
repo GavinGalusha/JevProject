@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 from pathlib import Path
@@ -22,7 +23,28 @@ def configure_text_model() -> None:
         os.environ.setdefault("TEXT_MODEL", "gpt-5-mini")
 
 
-def https_enabled() -> bool:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run the Jev living-room remote")
+    protocol = parser.add_mutually_exclusive_group()
+    protocol.add_argument(
+        "--http",
+        dest="https",
+        action="store_false",
+        help="serve plain HTTP for temporary LAN testing (phone microphone unavailable)",
+    )
+    protocol.add_argument(
+        "--https",
+        dest="https",
+        action="store_true",
+        help="serve HTTPS, overriding JEV_HTTPS (the default)",
+    )
+    parser.set_defaults(https=None)
+    return parser.parse_args(argv)
+
+
+def https_enabled(cli_override: bool | None = None) -> bool:
+    if cli_override is not None:
+        return cli_override
     return os.environ.get("JEV_HTTPS", "1").strip().lower() not in {"0", "false", "no"}
 
 
@@ -49,7 +71,8 @@ def print_pairing(pairing, settings: Settings, scheme: str = "http") -> None:
     print("Ready. Each command's progress will print below.\n", flush=True)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     load_dotenv(Path.cwd() / ".env")
     configure_text_model()
     try:
@@ -66,7 +89,7 @@ def main() -> None:
     app = create_app(settings)
     tls: dict[str, str] = {}
     scheme = "http"
-    if https_enabled():
+    if https_enabled(args.https):
         cert, key = ensure_certificate(serve_host(settings))
         tls = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
         scheme = "https"

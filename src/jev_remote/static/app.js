@@ -1,8 +1,20 @@
 const $ = (selector) => document.querySelector(selector);
 const tokenDialog = $("#token-dialog");
 const speakButton = $("#speak");
+const visionRecovery = $("#vision-recovery");
+const guidedMode = $("#guided-mode");
 let token = localStorage.getItem("jevRemoteToken") || "";
 let polling = null;
+let submitting = false;
+
+visionRecovery.checked = localStorage.getItem("jevVisionRecovery") === "1";
+visionRecovery.addEventListener("change", () => {
+  localStorage.setItem("jevVisionRecovery", visionRecovery.checked ? "1" : "0");
+});
+guidedMode.checked = localStorage.getItem("jevGuidedMode") === "1";
+guidedMode.addEventListener("change", () => {
+  localStorage.setItem("jevGuidedMode", guidedMode.checked ? "1" : "0");
+});
 
 function showStatus(state, message) {
   $("#status-dot").className = `status-dot ${state}`;
@@ -13,22 +25,43 @@ function showStatus(state, message) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...(options.headers || {}) },
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || `Request failed (${response.status})`);
-  return body;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const response = await fetch(path, {
+      ...options,
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...(options.headers || {}) },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(body.detail || `Request failed (${response.status})`);
+      error.status = response.status;
+      throw error;
+    }
+    return body;
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error("The PC did not respond within 12 seconds. Check that Jev is still running.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function refreshStatus() {
   try {
     const result = await api("/api/status");
-    showStatus(result.state, result.message || "Ready");
+    const progress = result.state === "working"
+      ? ` · ${result.steps || 0} steps · ${Math.round((result.elapsed_ms || 0) / 1000)}s`
+      : "";
+    showStatus(result.state, (result.message || "Ready") + progress);
     $("#save-command").hidden = !(result.state === "done" && lastJevCommand && !result.media);
+    if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 1000);
     if (result.state !== "working" && polling) { clearInterval(polling); polling = null; }
   } catch (error) {
+    if (polling) { clearInterval(polling); polling = null; }
     showStatus("error", error.message);
   }
 }
@@ -37,26 +70,38 @@ let lastJevCommand = null;
 
 async function sendCommand(text, extra = {}) {
   if (!token) { tokenDialog.showModal(); return { ok: false, message: "Enter your access token first" }; }
+  if (submitting) return { ok: false, message: "That command is already being sent" };
+  submitting = true;
+  $("#command-form button[type='submit']").disabled = true;
   showStatus("working", `Sending “${text}”…`);
   try {
-    const result = await api("/api/command", { method: "POST", body: JSON.stringify({ text, ...extra }) });
-    lastJevCommand = { text, start_url: extra.start_url || "", fullscreen: Boolean(extra.fullscreen) };
+    const payload = {
+      guided: guidedMode.checked,
+      vision_recovery: visionRecovery.checked,
+      ...extra,
+    };
+    const result = await api("/api/command", { method: "POST", body: JSON.stringify({ text, ...payload }) });
+    lastJevCommand = { text, start_url: payload.start_url || "", fullscreen: Boolean(payload.fullscreen) };
     $("#save-command").hidden = true;
     showStatus(result.state, result.message);
     if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 1000);
     document.querySelector(".status-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
-    return { ok: true };
+    return { ok: true, duplicate: Boolean(result.duplicate) };
   } catch (error) {
-    showStatus("error", error.message);
+    if (error.status === 409) await refreshStatus();
+    else showStatus("error", error.message);
     return { ok: false, message: error.message };
+  } finally {
+    submitting = false;
+    $("#command-form button[type='submit']").disabled = false;
   }
 }
 
-$("#command-form").addEventListener("submit", (event) => {
+$("#command-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = $("#command");
   const text = input.value.trim();
-  if (text) { sendCommand(text); input.value = ""; }
+  if (text && (await sendCommand(text)).ok) input.value = "";
 });
 
 document.querySelectorAll("[data-command]").forEach((button) =>

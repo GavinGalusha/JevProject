@@ -28,6 +28,8 @@ class CommandBody(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     start_url: str | None = Field(default=None, max_length=2000)
     fullscreen: bool = False
+    vision_recovery: bool = False
+    guided: bool = False
 
 
 class SavedBody(BaseModel):
@@ -43,7 +45,11 @@ def create_app(
     saved: SavedCommands | None = None,
 ) -> FastAPI:
     saved_commands = saved or SavedCommands()
-    remote = controller or RemoteController(settings.start_url)
+    remote = controller or RemoteController(
+        settings.start_url,
+        command_timeout=settings.command_timeout_seconds,
+        stall_timeout=settings.stall_timeout_seconds,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -102,6 +108,8 @@ def create_app(
                 parse_command(body.text),
                 start_url=body.start_url,
                 then_fullscreen=body.fullscreen,
+                vision_recovery=body.vision_recovery,
+                guided=body.guided,
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
