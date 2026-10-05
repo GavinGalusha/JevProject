@@ -1,0 +1,42 @@
+JEV DEMO COMMANDS
+Run: uv run jev-remote --profile demo     (every command starts on Google)
+Pre-warm with one throwaway command first, e.g. "search for weather".
+Nothing here needs a login or a payment, and none of it buys anything.
+
+--- LONG-RUNNING (many steps, shows the loop) ---
+
+1. Flights, filled in by hand (shows the whole form, not Google's shortcut)
+   Go to Google Flights and set a one way flight from Melbourne Florida to San Diego
+   leaving this Thursday, then show the results
+
+2. Tubi
+   go to tubi tv, search duck dynasty, and select season 1 episode 4
+
+3. Recipe to grocery list
+   Find a chicken tikka masala recipe on Serious Eats and open the page with the ingredient list
+
+4. Maps with a route
+   Open Google Maps and get driving directions from Orlando to Miami, then show the route options
+
+5. Wikipedia rabbit hole
+   Open the Wikipedia page for the Apollo 11 mission, then open the page for the person who
+   flew the command module
+
+6. Weather across two steps
+   Search for the 10 day forecast for San Diego and open the hourly view for tomorrow
+
+7. Product comparison (stops before any purchase)
+   Search for the best rated noise cancelling headphones under 300 dollars and open the
+   top review page
+
+8. Hotel search
+   Go to Google Travel hotels, search hotels in San Diego for this weekend, and sort by lowest price
+
+--- QUICK (under 5 seconds, good for opening the demo) ---
+
+9. Search for how tall is the Eiffel Tower
+10. Open the weather for Melbourne Florida
+
+--- FOR THE SPEED COMPARISON ---
+Use the same wording for the other agent and add: "stop when the results are showing".
+Run each 3 times and keep the median.

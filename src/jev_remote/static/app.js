@@ -58,7 +58,7 @@ async function refreshStatus() {
       : "";
     showStatus(result.state, (result.message || "Ready") + progress);
     $("#save-command").hidden = !(result.state === "done" && lastJevCommand && !result.media);
-    if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 1000);
+    if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 500);
     if (result.state !== "working" && polling) { clearInterval(polling); polling = null; }
   } catch (error) {
     if (polling) { clearInterval(polling); polling = null; }
@@ -84,7 +84,7 @@ async function sendCommand(text, extra = {}) {
     lastJevCommand = { text, start_url: payload.start_url || "", fullscreen: Boolean(payload.fullscreen) };
     $("#save-command").hidden = true;
     showStatus(result.state, result.message);
-    if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 1000);
+    if (result.state === "working" && !polling) polling = setInterval(refreshStatus, 500);
     document.querySelector(".status-card").scrollIntoView({ behavior: "smooth", block: "nearest" });
     return { ok: true, duplicate: Boolean(result.duplicate) };
   } catch (error) {
@@ -114,6 +114,37 @@ $("#kill").addEventListener("click", async () => {
     const result = await api("/api/kill", { method: "POST" });
     if (polling) { clearInterval(polling); polling = null; }
     showStatus(result.state, result.message);
+  } catch (error) { showStatus("error", error.message); }
+});
+
+async function waitForServer() {
+  // The server shuts down and starts again; wait for it to go away and come back.
+  let sawDown = false;
+  const started = Date.now();
+  while (Date.now() - started < 90000) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    try {
+      const response = await fetch("/api/health", { cache: "no-store" });
+      if (response.ok && (sawDown || Date.now() - started > 15000)) return true;
+    } catch (error) {
+      sawDown = true;
+    }
+  }
+  return false;
+}
+
+$("#close-browser").addEventListener("click", async () => {
+  if (!token || !confirm("Close the browser on the TV and restart the server? Anything running stops, and your next command reopens the browser.")) return;
+  showStatus("working", "Closing the browser…");
+  try {
+    const result = await api("/api/close-browser", { method: "POST" });
+    if (polling) { clearInterval(polling); polling = null; }
+    showStatus(result.restarting ? "working" : result.state, result.message);
+    if (result.restarting) {
+      const back = await waitForServer();
+      if (back) await refreshStatus();
+      else showStatus("error", "The server did not come back within 90 seconds. Check the PC.");
+    }
   } catch (error) { showStatus("error", error.message); }
 });
 
@@ -193,7 +224,7 @@ if (Recognition) {
     sent = true;
     setButton("sending");
     help.textContent = `Sending: “${text}”`;
-    const { ok, message } = await sendCommand(text);
+    const { ok, message } = await sendCommand(text, { fullscreen: true }); // voice: always fullscreen at the end
     help.textContent = ok ? `Sent: “${text}”` : `“${text}” didn't run: ${message}`;
     setButton(ok ? "sent" : "idle");
     clearTimeout(resetTimer);

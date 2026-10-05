@@ -434,3 +434,142 @@ def test_a_playing_ad_counts_as_still_loading_so_it_is_not_clicked_again():
     movie = [{"paused": False, "ended": False, "ready": 4, "d": 2700.0}]
     browser._read_videos = Mock(return_value=movie)
     assert browser._video_loading(_player_probe()) is False
+
+
+def _waiting_browser(target):
+    browser = _browser(None)
+    browser.expect_player = True
+    browser.target_episode = target
+    return browser
+
+
+def test_by_default_every_page_is_waited_on_even_with_a_named_episode(monkeypatch):
+    monkeypatch.setattr("jev_remote.safe_browser.time.sleep", lambda _s: None)
+    monkeypatch.setenv("JEV_PLAYER_WAIT_MS", "500")
+    monkeypatch.delenv("JEV_FAST_PLAYER_WAIT", raising=False)
+    browser = _waiting_browser((2, 4))
+    page = {
+        **_page(),
+        "title": "Everybody Hates Chris - Tubi",
+        "url": "https://tubitv.com/series/1",
+    }
+    browser._with_video_player(page)
+    assert browser.evaluate.call_count > 1  # the pipeline you use at home is unchanged
+
+
+def test_with_fast_wait_on_only_the_episodes_page_is_waited_on(monkeypatch):
+    monkeypatch.setattr("jev_remote.safe_browser.time.sleep", lambda _s: None)
+    monkeypatch.setenv("JEV_PLAYER_WAIT_MS", "500")
+    monkeypatch.setenv("JEV_FAST_PLAYER_WAIT", "1")
+
+    # a search results / series page: one probe, no waiting
+    other = _waiting_browser((2, 4))
+    page = {
+        **_page(),
+        "title": "Everybody Hates Chris - Tubi",
+        "url": "https://tubitv.com/series/1",
+    }
+    other._with_video_player(page)
+    assert other.evaluate.call_count == 1
+
+    # the episode's own page: it does wait for the player to load
+    episode = _waiting_browser((2, 4))
+    page = {
+        **_page(),
+        "title": "Watch Everybody Hates Chris S02:E04 - Everybody Hates a Liar",
+        "url": "https://tubitv.com/tv-shows/9/s02-e04-everybody-hates-a-liar",
+    }
+    episode._with_video_player(page)
+    assert episode.evaluate.call_count > 1
+
+
+def test_without_a_named_episode_every_page_is_still_waited_on(monkeypatch):
+    monkeypatch.setattr("jev_remote.safe_browser.time.sleep", lambda _s: None)
+    monkeypatch.setenv("JEV_PLAYER_WAIT_MS", "500")
+    movie = _waiting_browser(None)
+    movie._with_video_player({**_page(), "title": "Watch Moana", "url": "https://x.example/m1"})
+    assert movie.evaluate.call_count > 1
+
+
+def test_a_player_that_is_already_there_is_offered_without_any_wait():
+    browser = _waiting_browser((2, 4))
+    browser.evaluate = Mock(return_value=_player_probe())
+    page = browser._with_video_player({**_page(), "title": "x", "url": "https://x.example/series"})
+    assert PLAYER_LABEL in _labels(page) and browser.evaluate.call_count == 1
+
+
+def test_a_playing_video_on_the_wrong_page_is_not_reported_as_success():
+    browser = _browser(_player_probe(playing=True))
+    browser.target_episode = (2, 4)
+    page = {
+        **_page(),
+        "title": "Watch Pus-y Catz | Tubi",
+        "url": "https://tubitv.com/movies/100061715/pus-y-catz",
+    }
+    result = browser._with_video_player(page)
+    assert "NOT complete" in result["text"] and "Season 2 Episode 4" in result["text"]
+    assert "The playback goal is complete" not in result["text"]
+    assert PLAYER_LABEL not in _labels(result)  # and it still must not be clicked (it would pause)
+
+
+def test_a_playing_video_on_the_requested_episode_is_success():
+    browser = _browser(_player_probe(playing=True))
+    browser.target_episode = (2, 4)
+    page = {
+        **_page(),
+        "title": "Watch Everybody Hates Chris S02:E04 - Everybody Hates a Liar",
+        "url": "https://tubitv.com/tv-shows/200203411/s02-e04-everybody-hates-a-liar",
+    }
+    assert "The playback goal is complete" in browser._with_video_player(page)["text"]
+
+
+def test_without_a_named_episode_any_playing_video_is_still_success():
+    browser = _browser(_player_probe(playing=True))
+    page = {**_page(), "title": "lofi", "url": "https://www.youtube.com/watch?v=x"}
+    assert "The playback goal is complete" in browser._with_video_player(page)["text"]
+
+
+def test_a_verified_episode_carries_the_marker_that_lets_jev_finish():
+    browser = _browser(_player_probe(playing=True))
+    browser.target_episode = (2, 4)
+    page = {
+        **_page(),
+        "title": "Watch Everybody Hates Chris S02:E04",
+        "url": "https://tubitv.com/tv-shows/9/s02-e04-x",
+    }
+    text = browser._with_video_player(page)["text"]
+    assert "[verified: Season 2 Episode 4]" in text
+    assert text.startswith("[Jev]")  # notes lead the page text, where they are noticed
+
+
+def test_the_wrong_page_never_carries_the_verified_marker():
+    browser = _browser(_player_probe(playing=True))
+    browser.target_episode = (2, 4)
+    page = {**_page(), "title": "Pus-y Catz", "url": "https://tubitv.com/movies/1/x"}
+    assert "[verified" not in browser._with_video_player(page)["text"]
+
+
+def test_a_player_scrolled_out_of_view_is_scrolled_back_before_it_is_offered():
+    probe = {**_player_probe(), "onscreen": False}
+    browser = _browser(probe)
+    result = browser._with_video_player(_page())
+    assert PLAYER_LABEL in _labels(result)
+    scrolls = [c.args[0] for c in browser.evaluate.call_args_list if "scrollIntoView" in c.args[0]]
+    assert len(scrolls) == 1 and "nodes.get(41)" in scrolls[0]
+
+
+def test_a_player_already_on_screen_is_left_where_it_is():
+    browser = _browser({**_player_probe(), "onscreen": True})
+    browser._with_video_player(_page())
+    assert not [c for c in browser.evaluate.call_args_list if "scrollIntoView" in c.args[0]]
+
+
+def test_a_playing_player_that_has_scrolled_away_is_still_recognised_as_playing():
+    browser = _browser({**_player_probe(playing=True), "onscreen": False})
+    browser.target_episode = (2, 4)
+    page = {
+        **_page(),
+        "title": "Watch Everybody Hates Chris S02:E04",
+        "url": "https://tubitv.com/tv-shows/9/s02-e04-x",
+    }
+    assert "[verified: Season 2 Episode 4]" in browser._with_video_player(page)["text"]

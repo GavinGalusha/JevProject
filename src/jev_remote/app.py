@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hmac
 import ipaddress
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -136,6 +137,23 @@ def create_app(
     @app.post("/api/kill", dependencies=[Depends(authorize)])
     def kill():
         return remote.kill()
+
+    @app.post("/api/close-browser", dependencies=[Depends(authorize)])
+    def close_browser():
+        try:
+            result = dict(remote.close_browser())
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        restart = getattr(app.state, "request_restart", None)
+        if restart and os.environ.get("JEV_RESTART_ON_CLOSE", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+        }:
+            restart()
+            result["restarting"] = True
+            result["message"] = "Browser closed. Restarting the server…"
+        return result
 
     @app.post("/api/arm", dependencies=[Depends(authorize)])
     def arm():

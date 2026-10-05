@@ -84,3 +84,39 @@ def ensure_chrome(timeout: float = 30.0) -> str:
             return f"Launched Chrome (profile {profile}) at {cdp_url}"
         time.sleep(0.5)
     raise RuntimeError(f"Chrome did not open {cdp_url} within {timeout:.0f}s")
+
+
+def quit_chrome(cdp_url: str | None = None, timeout: float = 8.0) -> bool:
+    """Quit the dedicated Chrome through its own debugging socket (no helper process needed).
+
+    Returns True if a Chrome was running and has now quit, False if none was running. Only a
+    local Chrome is ever touched.
+    """
+    import json
+
+    cdp_url = (cdp_url or os.environ.get("BU_CDP_URL", "").strip() or DEFAULT_CDP_URL).rstrip("/")
+    parsed = urlparse(cdp_url)
+    if parsed.hostname not in {"127.0.0.1", "localhost"}:
+        raise RuntimeError(f"Refusing to close a browser that is not on this PC ({cdp_url}).")
+    if not cdp_alive(cdp_url):
+        return False
+
+    from websockets.sync.client import connect
+
+    with urllib.request.urlopen(cdp_url + "/json/version", timeout=3) as response:
+        socket_url = json.load(response)["webSocketDebuggerUrl"]
+    try:
+        with connect(socket_url, open_timeout=3, close_timeout=1) as socket:
+            socket.send(json.dumps({"id": 1, "method": "Browser.close"}))
+            try:
+                socket.recv(timeout=2)
+            except Exception:
+                pass  # Chrome may drop the connection while it quits
+    except Exception:
+        pass  # same: what matters is whether the port goes away
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not cdp_alive(cdp_url):
+            return True
+        time.sleep(0.2)
+    raise RuntimeError("Chrome did not quit in time")

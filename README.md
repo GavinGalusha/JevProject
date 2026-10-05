@@ -279,6 +279,38 @@ It never clicks Sign in, Join, Accept, Allow, Subscribe, Install, Buy or similar
 
 Turn it off with `JEV_DISMISS_POPUPS=0`. To check it on this machine without any model calls, run `uv run python scripts/check_popups.py` (needs the dedicated Chrome from `uv run jev-remote`). The test pages are in `tests/fixtures/popups/`.
 
+## Demo profile
+
+To demo the whole pipeline starting from Google, without touching your normal setup:
+
+```sh
+cp .env.demo.example .env.demo      # once; contains no keys
+uv run jev-remote --profile demo
+```
+
+`--profile demo` loads `.env.demo` on top of `.env` (keys and everything else still come from `.env`). It starts every command on Google and turns every wait down as far as is sensible: fullscreen after 2 s instead of 10, a 600 ms page-settle instead of 1.5 s, 40 ms polling where it used to be 250 ms, the video-clock check at 300 ms, `WAIT` holding until the page changes instead of asking the model again, plain search boxes filled from your own words (no 1.4 s model call), the player wait only on the episode's own page, and no browser-connection refresh at the start of a command. Each setting is listed with its normal value in `.env.demo.example`. A plain `uv run jev-remote` ignores all of it, so a goojara `JEV_START_URL` and the normal timings stay exactly as they are.
+
+Every finished command prints a `⏱` line in the server window: startup, model decisions, typing, and "page loads, settling and waits", so you can see where the time went. Pre-warm with one throwaway command before demoing.
+
+Suggested command, which shows search, picking the right site and result, the season menu, the episode and playback:
+
+> Search Google for Everybody Hates Chris season 2 episode 4 on Tubi and play it
+
+## Knowing when it is done
+
+- **Task completed / Task failed.** When a command ends, a large green or red card appears on the controlled browser (so it is readable from the couch), with the command or the reason. It hides itself after `JEV_BANNER_SECONDS`, ignores the mouse, and is drawn before the fullscreen step so fullscreen never hides it. `JEV_BANNER=0` turns it off.
+- **A shaky DONE is questioned.** If the model says DONE with confidence below `JEV_MIN_DONE_CONFIDENCE` (0.6), it is told that DONE needs visible evidence for every part of the goal and decides once more (for example, press Search instead of stopping at a filled-in form). Whatever it says the second time stands, so this costs at most one extra model call.
+
+## Login walls and CAPTCHAs
+
+Jev never types credentials and never solves a CAPTCHA. Each time it reads a page it checks for a wall (a visible password field, a CAPTCHA widget, "sign in to continue", a paywall, "verify you are human"). If a click landed on one:
+
+1. It goes back one step in the tab's history.
+2. It hides the link that led there for the rest of that command (the exact link; if the wall was on a different website, every link to that site).
+3. It adds a note to the page text, `[Jev] That page needed a login …, so Jev went back … Choose a different link.`, and the model picks another link.
+
+A passive "Just a moment / checking your browser" page gets up to 8 seconds to clear on its own before it counts. After 3 walls in one command, or when there is no earlier page to go back to, Jev tells the model to stop. A sign-in link in a page header is not a wall. Settings: `JEV_WALL_BACKTRACK`, `JEV_MAX_WALLS`, `JEV_WALL_WAIT_MS`.
+
 ## Video players
 
 Embedded players are cross-origin iframes, which the page reader normally cannot see. Jev adds the player as a control (**Video player — click to start playback**) and, for playback requests, follows these rules:
@@ -299,6 +331,17 @@ Embedded players are cross-origin iframes, which the page reader normally cannot
 - Launch flags only apply when Chrome **starts**. If the dedicated Chrome is already running from before, quit it once (the next command or `uv run jev-remote` reopens it in kiosk mode).
 - To leave kiosk mode on the PC: `Alt+F4` (Windows) or `Cmd+Q` (Mac) closes that Chrome. STOP & LOCK only closes Jev's tabs.
 - On a development laptop, set `JEV_KIOSK=0` in `.env` to get a normal window again. `JEV_FIXED_VIEWPORT=1` keeps the old fixed viewport.
+
+## Closing the browser from the phone
+
+The remote has two red controls:
+
+- **STOP & LOCK** stops the current command, closes Jev's tabs and locks the remote until you tap **RE-ARM REMOTE**.
+- **CLOSE BROWSER & RESTART** stops whatever is running, **quits the dedicated Chrome** (the kiosk window on the TV) and **restarts the server**. It does not lock the remote. The phone page waits and reconnects by itself, and Chrome stays closed until your next command reopens it.
+
+`uv run jev-remote` runs the real server as a child process of a small supervisor that shares your console, so `Ctrl+C` still stops everything. The supervisor starts a fresh server when the old one exits with the restart code, and passes any other exit (a crash, `Ctrl+C`) straight through. Set `JEV_RESTART_ON_CLOSE=0` to close only the browser.
+
+A restart resets the in-memory safety caps (per-command steps, API calls per hour) and prints a new pairing code in the server window. Phones already paired keep working. Only a Chrome on this PC is ever closed.
 
 ## After every command
 
@@ -322,7 +365,8 @@ Use these kill switches, from strongest to most convenient:
 1. **Physical stop:** press `Ctrl+C` in the PowerShell window running `uv run jev-remote`. This stops the server and closes its owned browser tabs.
 2. **Phone stop:** tap **STOP & LOCK**. This signals the active run to stop, closes every Jev-owned tab, and rejects all commands until **RE-ARM REMOTE** is tapped.
 3. **Auto-start stop:** run `powershell -ExecutionPolicy Bypass -File .\scripts\stop.ps1` to stop the installed Scheduled Task.
-4. **Hard network stop:** disable Wi-Fi/Ethernet on the PC or close Chrome if anything appears wrong.
+4. **Close the browser:** tap **CLOSE BROWSER & RESTART** on the phone, or `Alt+F4` on the PC.
+5. **Hard network stop:** disable Wi-Fi/Ethernet on the PC or close Chrome if anything appears wrong.
 
 Test in this order:
 

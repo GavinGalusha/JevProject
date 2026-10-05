@@ -71,6 +71,12 @@ def relabel_js(nodes: list[int]) -> str:
         r"""((nodes) => {
   const cache = window.__jevFast;
   const current = document.querySelector('[data-season][disabled]');
+  // A season dropdown ("Season 1") shows the current season as its text instead.
+  let dropdownSeason = null;
+  for (const e of document.querySelectorAll('[role="combobox"],[aria-haspopup="listbox"]')) {
+    const m = (e.innerText || '').trim().match(/^Season\s+(\d{1,2})$/i);
+    if (m && e.checkVisibility && e.checkVisibility()) { dropdownSeason = +m[1]; break; }
+  }
   const hasSeasons = !!document.querySelector('[data-season]') ||
     /\bSeason\s+\d/i.test(document.body ? document.body.innerText : '');
   if (!cache || !hasSeasons) return {labels: {}, current_season: null};
@@ -98,12 +104,16 @@ def relabel_js(nodes: list[int]) -> str:
       if ((m = t.match(/^(\d{1,3})\s+Season\s+(\d{1,2})\b/i))) {
         labels[node] = 'Season ' + (+m[2]) + ' Episode ' + (+m[1]) + ': ' + own; break;
       }
+      if ((m = t.match(/^S0*(\d{1,2})\s*[:.\-]?\s*E0*(\d{1,3})\b/i))) {
+        const bare = own.replace(/^S\d+\s*[:.\-]?\s*E\d+\s*[-:\u2013]?\s*/i, '');
+        labels[node] = 'Season ' + (+m[1]) + ' Episode ' + (+m[2]) + ': ' + bare; break;
+      }
       if ((m = t.match(/\bSeason\s+(\d{1,2})\D{1,12}(?:Episode|Ep\.?)\s*(\d{1,3})\b/i))) {
         labels[node] = 'Season ' + (+m[1]) + ' Episode ' + (+m[2]) + ': ' + own; break;
       }
     }
   }
-  const season = current ? parseInt(current.getAttribute('data-season'), 10) : null;
+  const season = current ? parseInt(current.getAttribute('data-season'), 10) : dropdownSeason;
   return {labels, current_season: season};
 })("""
         + str(list(nodes))
@@ -120,10 +130,10 @@ def scroll_to_episode_js(season: int, episode: int) -> str:
     new RegExp('^0*' + episode + '\\s+Season\\s+' + season + '\\b', 'i'),
     new RegExp('\\bSeason\\s+' + season + '\\D{1,12}(?:Episode|Ep\\.?)\\s*0*' + episode +
       '\\b', 'i'),
-    new RegExp('^S0*' + season + '\\s*E0*' + episode + '\\b', 'i')];
+    new RegExp('^S0*' + season + '\\s*[:.\\-]?\\s*E0*' + episode + '\\b', 'i')];
   // Only act on a real episode list (season buttons, or several "<n> Season <m>" rows), never on
   // a search result or article that merely mentions an episode.
-  const rowLike = /^\\d{1,3}\\s+Season\\s+\\d{1,2}\\b/i;
+  const rowLike = /^(?:\d{1,3}\s+Season\s+\d{1,2}|S\d{1,2}\s*[:.\-]?\s*E\d{1,3})\b/i;
   const listy = !!document.querySelector('[data-season]') ||
     [...document.querySelectorAll('div,li,tr,article,section,span')]
       .filter(e => { const t = text(e); return t.length < 600 && rowLike.test(t); }).length >= 3;
@@ -144,13 +154,26 @@ def scroll_to_episode_js(season: int, episode: int) -> str:
     )
 
 
-def on_episode_page(text: str, target: tuple[int, int] | None) -> bool:
-    """True if the visible text names the requested episode as the page being viewed."""
+def on_episode_page(
+    text: str, target: tuple[int, int] | None, title: str = "", url: str = ""
+) -> bool:
+    """True if the page being viewed is the requested episode.
+
+    The title and URL decide for sites that list every episode's code in the page body
+    (a series page would otherwise look like an episode page).
+    """
     if not target:
         return False
     season, episode = target
+    code = rf"\bS0*{season}\s*[:,.\-]?\s*E0*{episode}\b"
+    if (
+        re.search(code, title or "", re.I)
+        or re.search(rf"\bSeason\s+{season}\s+Episode\s+0*{episode}\b", title or "", re.I)
+        or re.search(rf"[/_-]s0*{season}[-_]?e0*{episode}(?:[-_/?#]|$)", url or "", re.I)
+    ):
+        return True
     return bool(
-        re.search(rf"\bS0*{season}\s*,?\s*E0*{episode}\b", text, re.I)
+        re.search(rf"\bS0*{season}\s*,\s*E0*{episode}\b", text, re.I)
         or re.search(rf"\bSeason\s+{season}\s+Episode\s+0*{episode}\b(?!\s*:)", text, re.I)
     )
 
@@ -169,7 +192,10 @@ def season_note(current: int | None, target: tuple[int, int] | None) -> str | No
     if target:
         season, episode = target
         if current != season:
-            note += f" The goal needs Season {season}: click the 'Season {season}' button once."
+            note += (
+                f" The goal needs Season {season}: choose 'Season {season}' once "
+                "(open the season menu first if it is a dropdown)."
+            )
         else:
             note += (
                 f" This is the requested season. Click the row labelled "

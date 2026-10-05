@@ -22,8 +22,9 @@ PLAYER_PROBE = r"""(() => {
     if (!e.checkVisibility({checkOpacity: true, checkVisibilityCSS: true})) continue;
     if (e.closest('[aria-hidden="true"],[inert]')) continue;
     const r = e.getBoundingClientRect();
-    const w = Math.min(r.right, vw) - Math.max(r.left, 0);
-    const h = Math.min(r.bottom, vh) - Math.max(r.top, 0);
+    // Size of the element itself, wherever the page happens to be scrolled: a player that has
+    // scrolled out of view is still the player (and may well be playing).
+    const w = r.width, h = r.height;
     // Big enough to be the main player, not a banner ad or a widget.
     if (w < 320 || h < 180 || w * h < 0.12 * vw * vh) continue;
     if (!best || w * h > best.area) best = {e, area: w * h, r};
@@ -40,6 +41,7 @@ PLAYER_PROBE = r"""(() => {
     tag: e.tagName.toLowerCase(),
     src: (e.src || e.currentSrc || '').slice(0, 300),
     fullscreen: !!document.fullscreenElement,
+    onscreen: r.bottom > 0 && r.top < vh && r.right > 0 && r.left < vw,
     playing: e.tagName === 'VIDEO' && !e.paused && !e.ended,
     rect: {x: r.x, y: r.y, w: r.width, h: r.height},
   };
@@ -117,6 +119,11 @@ FULLSCREEN_BUTTON_JS = r"""(() => {
 })()"""
 
 NOTE_PLAYING = "[Jev] The video player is now playing. The playback goal is complete."
+NOTE_PLAYING_VERIFIED = NOTE_PLAYING + " [verified: Season {season} Episode {episode}]"
+NOTE_PLAYING_WRONG = (
+    "[Jev] A video is playing, but this page is not Season {season} Episode {episode}. The goal "
+    "is NOT complete. Go to the requested episode; do not choose DONE."
+)
 NOTE_NOT_STARTED = (
     "[Jev] The video player has not started playing yet (clicked {clicks} time(s) so far). "
     "Click the video player again."

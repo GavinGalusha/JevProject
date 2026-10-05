@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
+from .banner import banner_enabled, banner_seconds
 from .budget import RequestBudget
 from .commands import ParsedCommand
 from .console import Heartbeat, say
@@ -16,6 +17,7 @@ from .goal_refiner import GoalPlan, refine_goal
 from .player import is_playback_goal, with_playback_rules
 from .series import parse_episode_goal, with_series_rules
 from .vision_recovery import RecoveryAdvice, analyze_screenshot
+from .walls import with_wall_rules
 
 
 class AgentLike(Protocol):
@@ -75,9 +77,7 @@ def _decision_target_label(decision: dict[str, Any]) -> str | None:
 
 
 AgentFactory = Callable[[str, str], AgentLike]
-VisionAnalyzer = Callable[
-    [str, str, dict[str, Any], list[dict[str, Any]]], RecoveryAdvice
-]
+VisionAnalyzer = Callable[[str, str, dict[str, Any], list[dict[str, Any]]], RecoveryAdvice]
 GoalRefiner = Callable[[str, str | None], GoalPlan]
 
 
@@ -101,6 +101,16 @@ def _no_chrome() -> str | None:
 
 def _no_reset() -> None:
     return None
+
+
+def _no_close_browser() -> bool:
+    return False
+
+
+def _default_browser_closer() -> bool:
+    from .chrome import quit_chrome
+
+    return quit_chrome()
 
 
 def _default_connection_reset() -> None:
@@ -148,8 +158,13 @@ def _default_agent_factory(url: str, goal: str) -> AgentLike:
     # Keep the audited Jev action machinery, but avoid page-wide false invalidations on dynamic
     # sites. Agent.__init__ resolves Browser from its module globals when the instance is created.
     agent_module.Browser = StableTargetBrowser
+    if not getattr(agent_module.choose, "_jev_guarded", False):
+        from .done_guard import guard_choose
+
+        agent_module.choose = guard_choose(agent_module.choose)
     StableTargetBrowser.expect_player = is_playback_goal(goal)
     StableTargetBrowser.target_episode = parse_episode_goal(goal)
+    StableTargetBrowser.goal_text = goal
 
     base_url = os.environ.get("TEXT_MODEL_BASE_URL", "").rstrip("/")
     if base_url == "https://api.openai.com/v1":
@@ -158,6 +173,12 @@ def _default_agent_factory(url: str, goal: str) -> AgentLike:
         from .openai_text import field_text
 
         agent_module.field_text = field_text
+    if _flag_env("JEV_FAST_TEXT", False) and not getattr(
+        agent_module.field_text, "_jev_fast", False
+    ):
+        from .fast_text import wrap_field_text
+
+        agent_module.field_text = wrap_field_text(agent_module.field_text)
     return Agent(url, goal)
 
 
@@ -177,6 +198,7 @@ class RemoteController:
         max_stale_decisions: int | None = None,
         chrome_ensurer: Callable[[], str | None] | None = None,
         connection_reset: Callable[[], None] | None = None,
+        browser_closer: Callable[[], bool] | None = None,
     ):
         self.start_url = start_url
         # Only the real browser path needs Chrome; test doubles must never launch one.
@@ -190,6 +212,13 @@ class RemoteController:
                 _default_connection_reset if agent_factory is _default_agent_factory else _no_reset
             )
         self.connection_reset = connection_reset
+        if browser_closer is None:
+            browser_closer = (
+                _default_browser_closer
+                if agent_factory is _default_agent_factory
+                else _no_close_browser
+            )
+        self.browser_closer = browser_closer
         self.budget = budget or RequestBudget()
         self.agent_factory = agent_factory
         self._lock = threading.RLock()
@@ -322,11 +351,14 @@ class RemoteController:
     ) -> None:
         new_agent: AgentLike | None = None
         adopted = False
+        banner_shown = False
         started = time.monotonic()
         progress = {"steps": 0, "what": "opening the browser tab"}
         logged = tokens_in = tokens_out = jev_calls = openai_calls = 0
         decision_logged = text_logged = vision_recoveries = guided_plans = 0
         stale_retries = consecutive_stale = 0
+        model_ms = text_ms = 0
+        startup_s = 0.0
         execution_goal = goal
 
         def describe() -> str:
@@ -399,7 +431,9 @@ class RemoteController:
                             guided_plans=1,
                             updated_at=self._now(),
                         )
-                execution_goal = with_series_rules(with_playback_rules(execution_goal))
+                execution_goal = with_wall_rules(
+                    with_series_rules(with_playback_rules(execution_goal))
+                )
                 if _flag_env("JEV_REFRESH_PER_COMMAND", True):
                     # A clean slate for every command: the old tab (and its video/fullscreen)
                     # goes first, then the browser connection is renewed.
@@ -408,6 +442,7 @@ class RemoteController:
                     self._reset_browser_connection()
                 self._ensure_chrome(job_id, progress)
                 new_agent = self._create_agent(url, execution_goal)
+                startup_s = time.monotonic() - started
                 with self._lock:
                     if self._active_job_id != job_id or cancel_event.is_set():
                         return
@@ -443,6 +478,7 @@ class RemoteController:
                             used_out = _tokens(usage, _OUTPUT_KEYS)
                             tokens_in += used_in
                             tokens_out += used_out
+                            model_ms += int(decision.get("latency_ms") or 0)
                             target = decision.get("target")
                             target_label = _decision_target_label(decision)
                             target_text = f" target={target}" if target is not None else ""
@@ -471,6 +507,7 @@ class RemoteController:
                             used_out = _tokens(usage, _OUTPUT_KEYS)
                             tokens_in += used_in
                             tokens_out += used_out
+                            text_ms += int(helper.get("latency_ms") or 0)
                             say(
                                 f"   text  {index:>2}  field={helper.get('field', '?')!r} "
                                 f"value={helper.get('value', '')!r} "
@@ -601,6 +638,12 @@ class RemoteController:
                 f"{vision_recoveries} vision recoveries · {stale_retries} stale retries · "
                 f"{tokens_in:,} in / {tokens_out:,} out tokens · {cost_text} · {elapsed()}s"
             )
+            total_s = time.monotonic() - started
+            other_s = max(0.0, total_s - startup_s - model_ms / 1000 - text_ms / 1000)
+            summary += (
+                f"\n   ⏱ startup {startup_s:.1f}s · model decisions {model_ms / 1000:.1f}s · "
+                f"typing {text_ms / 1000:.1f}s · page loads, settling and waits {other_s:.1f}s"
+            )
             final = last_state.get("status")
             if limit_reason:
                 say(f"⚠  LIMIT HIT — {limit_reason}. Command stopped.", "yellow")
@@ -627,11 +670,7 @@ class RemoteController:
                     state="done" if final == "done" and not limit_reason else "error",
                     message=(
                         limit_reason
-                        or (
-                            f"Vision recovery failed: {recovery_error}"
-                            if recovery_error
-                            else None
-                        )
+                        or (f"Vision recovery failed: {recovery_error}" if recovery_error else None)
                         or stale_reason
                         or (
                             "Command completed"
@@ -644,11 +683,22 @@ class RemoteController:
                     ),
                     updated_at=self._now(),
                 )
+                result_ok = self._status.get("state") == "done"
+                result_message = str(self._status.get("message") or "")
             if old_agent:
                 self._close_agent(old_agent, "previous browser tab")
-            if final == "done" and not limit_reason and (
-                then_fullscreen
-                or (_flag_env("JEV_AUTO_FULLSCREEN", True) and is_playback_goal(execution_goal))
+            if final == "done" and not is_playback_goal(execution_goal):
+                close_ui = getattr(getattr(new_agent, "browser", None), "close_open_ui", None)
+                if close_ui is not None:
+                    close_ui()
+            self._announce(new_agent, result_ok, goal, result_message)
+            if (
+                final == "done"
+                and not limit_reason
+                and (
+                    then_fullscreen
+                    or (_flag_env("JEV_AUTO_FULLSCREEN", True) and is_playback_goal(execution_goal))
+                )
             ):
                 self._schedule_fullscreen(new_agent, job_id)
         except Exception as exc:
@@ -670,6 +720,8 @@ class RemoteController:
                     )
             if not stopped and current:
                 say(f"✖  ERROR after {elapsed()}s — {type(exc).__name__}: {exc}", "red")
+                if new_agent is not None:
+                    banner_shown = self._announce(new_agent, False, goal, message)
                 if _flag_env("JEV_DEBUG", False):
                     import traceback
 
@@ -679,6 +731,8 @@ class RemoteController:
                 if self._running_agent is new_agent:
                     self._running_agent = None
             if new_agent and not adopted:
+                if banner_shown:
+                    time.sleep(banner_seconds())  # leave the failure card on screen long enough
                 self._close_agent(new_agent, "failed browser tab")
 
     def _capture_screenshot(self, agent: AgentLike) -> str:
@@ -795,8 +849,7 @@ class RemoteController:
             return "A model provider rejected its API key. Check the keys in .env and restart Jev."
         if "connection" in lowered or "connect" in lowered:
             return (
-                "Jev could not reach the model provider or browser. "
-                "Check the connection and retry."
+                "Jev could not reach the model provider or browser. Check the connection and retry."
             )
         return detail or f"{type(exc).__name__} while running the command"
 
@@ -843,6 +896,20 @@ class RemoteController:
             self._agent = None
         self._close_agent(old, "previous browser tab")
 
+    def _announce(self, agent: AgentLike, ok: bool, goal: str, message: str) -> bool:
+        """Show "Task completed" / "Task failed" on the TV. True if the card was drawn."""
+        if not banner_enabled():
+            return False
+        show = getattr(getattr(agent, "browser", None), "show_banner", None)
+        if show is None:
+            return False
+        try:
+            if ok:
+                return bool(show("success", "Task completed", goal, banner_seconds()))
+            return bool(show("failure", "Task failed", message, banner_seconds()))
+        except Exception:
+            return False
+
     def _schedule_fullscreen(self, agent: AgentLike, job_id: int) -> None:
         """Fullscreen the player shortly after playback starts, retrying until it sticks."""
         threading.Thread(
@@ -867,7 +934,7 @@ class RemoteController:
         while time.monotonic() < deadline:
             if not self._still_current(agent):
                 return False
-            time.sleep(0.25)
+            time.sleep(_float_env("JEV_FULLSCREEN_TICK_S", 0.25))
         return self._still_current(agent)
 
     def _fullscreen_when_ready(self, agent: AgentLike) -> None:
@@ -1025,6 +1092,50 @@ class RemoteController:
                 agent.close()
             except Exception:
                 pass
+        return self.status()
+
+    def close_browser(self) -> dict[str, Any]:
+        """Stop what is running and quit the dedicated Chrome. Does not lock the remote.
+
+        The next command reopens Chrome by itself, so this is the "get it off the TV" button.
+        """
+        with self._lock:
+            self._stop_event.set()
+            if self._job_cancel_event:
+                self._job_cancel_event.set()
+            agents: list[AgentLike] = []
+            for candidate in (self._agent, self._running_agent):
+                if candidate and all(candidate is not agent for agent in agents):
+                    agents.append(candidate)
+            self._agent = None
+            self._running_agent = None
+            self._active_job_id = None
+            self._job_cancel_event = None
+            armed = self._armed
+        say("■  CLOSE BROWSER — stopping work and quitting Chrome", "yellow", rule=True)
+        for agent in agents:
+            self._close_agent(agent, "browser tab")
+        try:
+            closed = self.browser_closer()
+            error = None
+        except Exception as exc:
+            closed, error = False, str(exc)
+        self._reset_browser_connection()
+        if error:
+            message = f"Could not close the browser: {error}"
+        elif closed:
+            message = "Browser closed. Your next command reopens it."
+        else:
+            message = "No browser was open."
+        with self._lock:
+            self._status = {
+                "state": "error" if error else ("idle" if armed else "stopped"),
+                "message": message,
+                "command": None,
+                "armed": armed,
+                "updated_at": self._now(),
+            }
+        say(f"   {message}", "dim")
         return self.status()
 
     def arm(self) -> dict[str, Any]:

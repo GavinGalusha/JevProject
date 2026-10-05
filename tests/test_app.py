@@ -99,8 +99,12 @@ def test_saved_commands_roundtrip_and_auth(tmp_path):
     item = client.post(
         "/api/saved",
         headers=headers,
-        json={"name": "Wootly", "text": "Play {show} on Wootly", "fullscreen": True,
-              "start_url": "https://example.com/"},
+        json={
+            "name": "Wootly",
+            "text": "Play {show} on Wootly",
+            "fullscreen": True,
+            "start_url": "https://example.com/",
+        },
     ).json()
     assert item["fullscreen"] is True
     assert client.get("/api/saved", headers=headers).json() == [item]
@@ -143,3 +147,10 @@ def test_command_passes_guided_mode():
         json={"text": "Play a show", "guided": True},
     )
     assert controller.received[0][4] is True
+
+
+def test_a_spoken_command_always_asks_for_fullscreen_at_the_end():
+    from pathlib import Path
+
+    script = (Path(__file__).resolve().parent.parent / "src/jev_remote/static/app.js").read_text()
+    assert "sendCommand(text, { fullscreen: true })" in script

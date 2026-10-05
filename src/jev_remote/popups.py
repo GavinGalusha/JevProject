@@ -9,8 +9,9 @@ Sign in, Accept, Allow, Subscribe, Install, Buy or anything similar.
 
 from __future__ import annotations
 
+import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 # Text that makes an overlay an *interruption* rather than part of the task.
 INTERRUPTION_WORDS = (
@@ -45,8 +46,7 @@ NEVER_CLICK_NAME = (
 )
 
 # Runs in the page. Returns null, or the control to click plus why. It never clicks.
-OVERLAY_PROBE = (
-    r"""(() => {
+OVERLAY_PROBE = r"""(() => {
   const INTERRUPT = new RegExp(%(interrupt)r, 'i');
   const CONSENT = new RegExp(%(consent)r, 'i');
   const tried = (window.__jevPopupTried ||= new WeakSet());
@@ -144,14 +144,12 @@ OVERLAY_PROBE = (
             summary: norm(overlay.innerText).slice(0, 80)};
   }
   return null;
-})()"""
-    % {
-        "interrupt": INTERRUPTION_WORDS,
-        "consent": CONSENT_WORDS,
-        "dismiss": DISMISS_NAME,
-        "never": NEVER_CLICK_NAME,
-    }
-)
+})()""" % {
+    "interrupt": INTERRUPTION_WORDS,
+    "consent": CONSENT_WORDS,
+    "dismiss": DISMISS_NAME,
+    "never": NEVER_CLICK_NAME,
+}
 
 _TWO_PART_SUFFIXES = {"co", "com", "org", "net", "gov", "ac", "edu"}
 
@@ -187,3 +185,52 @@ def popup_targets_to_close(
             if site and site != own_site:
                 chosen.append(target)
     return chosen
+
+
+def link_sites(href: str | None) -> set[str]:
+    """Sites a link leads to, including a redirect wrapper like google.com/url?q=<target>."""
+    if not href:
+        return set()
+    sites = {site_of(href)}
+    for values in parse_qs(urlparse(href).query).values():
+        for value in values:
+            if value.lower().startswith(("http://", "https://")):
+                sites.add(site_of(value))
+    sites.discard("")
+    return sites
+
+
+def site_label(url: str | None) -> str:
+    """A site's recognisable name: 'tubitv' for tubitv.com, 'wootly' for web.wootly.ch."""
+    site = site_of(url)
+    parts = [part for part in site.split(".") if part]
+    if len(parts) >= 2:
+        label = parts[-3] if len(parts) >= 3 and parts[-2] in _TWO_PART_SUFFIXES else parts[-2]
+        return label
+    return site
+
+
+def goal_names_site(goal: str | None, url: str | None) -> bool:
+    """True if the user's own words name the site ("... on Tubi" -> tubitv.com).
+
+    An ad popup's domain never appears in what the user asked for, so a match means the new tab
+    is where they were heading. Words of 4+ letters are compared both ways (tubi / tubitv).
+    """
+    label = site_label(url).lower()
+    if len(label) < 4:
+        return False
+    first_paragraph = (goal or "").split("\n\n", 1)[0].lower()
+    for word in re.findall(r"[a-z0-9]{4,}", first_paragraph):
+        if word in label or label in word:
+            return True
+    return False
+
+
+def is_google_outbound(url: str | None) -> bool:
+    """Google's own redirect wrappers for result links (google.com/goto, google.com/url)."""
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    return (host == "google.com" or host.endswith(".google.com")) and parsed.path in {
+        "/goto",
+        "/url",
+    }

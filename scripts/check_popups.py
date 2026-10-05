@@ -201,6 +201,52 @@ def main() -> int:
             )
         browser.target_episode = None
 
+        # ---- login walls, CAPTCHAs and passive browser checks: back out, hide the link
+        browser._walls_hit, browser._avoid, browser._last_click = 0, None, None
+        browser.call("Page.navigate", url=BASE + "wall_listing.html")
+        time.sleep(0.8)
+        page = browser.observe(screenshot=False)
+        check(
+            "a 'Sign in' link in the page header is not mistaken for a wall",
+            "Members article" in controls(page) and "[Jev]" not in page["text"],
+            str(controls(page)),
+        )
+        for link, name in (("Members article", "login wall"), ("Download page", "CAPTCHA")):
+            action = next(a for a in page["actions"] if a["label"] == link)
+            browser.act(action, page)
+            time.sleep(0.8)
+            page = browser.observe(screenshot=False)
+            check(
+                f"{name}: went back one step and hid '{link}'",
+                page["url"].endswith("wall_listing.html")
+                and link not in controls(page)
+                and "went back" in page["text"]
+                and "Public article" in controls(page),
+                f"{page['url'].rsplit('/', 1)[-1]} | {controls(page)}",
+            )
+        action = next(a for a in page["actions"] if a["label"] == "Slow check article")
+        browser.act(action, page)
+        time.sleep(0.5)
+        page = browser.observe(screenshot=False)
+        check(
+            "a passive 'Just a moment' check is waited out, not treated as a wall",
+            page["url"].endswith("wall_transient.html") and "Real content" in page["text"],
+            page["text"][:70].replace("\n", " "),
+        )
+        browser.call("Page.navigate", url=BASE + "wall_listing.html")
+        time.sleep(0.8)
+        page = browser.observe(screenshot=False)
+        action = next(a for a in page["actions"] if a["label"] == "Public article")
+        browser.act(action, page)
+        time.sleep(0.5)
+        page = browser.observe(screenshot=False)
+        check(
+            "a normal page after the walls is read normally, and the hidden links stay hidden",
+            page["url"].endswith("wall_ok.html") and "went back" not in page["text"],
+            page["url"].rsplit("/", 1)[-1],
+        )
+        browser._avoid = None
+
         browser.call("Page.navigate", url=BASE + "ad_popup.html")
         time.sleep(0.6)
         before = page_tabs()

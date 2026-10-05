@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import uvicorn
@@ -38,8 +40,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="serve HTTPS, overriding JEV_HTTPS (the default)",
     )
+    parser.add_argument(
+        "--profile",
+        metavar="NAME",
+        help="also load .env.NAME on top of .env (for example --profile demo)",
+    )
     parser.set_defaults(https=None)
     return parser.parse_args(argv)
+
+
+def load_environment(profile: str | None = None, directory: Path | None = None) -> Path | None:
+    """Load .env, then (optionally) .env.<profile> over it. Returns the profile file used."""
+    directory = directory or Path.cwd()
+    load_dotenv(directory / ".env")
+    if not profile:
+        return None
+    if not profile.replace("-", "").replace("_", "").isalnum():
+        raise SystemExit(f"Invalid profile name {profile!r}: use letters, digits, - and _")
+    overlay = directory / f".env.{profile}"
+    if not overlay.is_file():
+        raise SystemExit(
+            f"Profile {profile!r} not found: create {overlay.name} "
+            f"(copy {overlay.name}.example if there is one)."
+        )
+    load_dotenv(overlay, override=True)
+    return overlay
 
 
 def https_enabled(cli_override: bool | None = None) -> bool:
@@ -71,16 +96,62 @@ def print_pairing(pairing, settings: Settings, scheme: str = "http") -> None:
     print("Ready. Each command's progress will print below.\n", flush=True)
 
 
+RESTART_EXIT_CODE = 75  # the server asks its supervisor for a fresh process
+SUPERVISED_ENV = "JEV_SUPERVISED"
+RESTARTED_ENV = "JEV_RESTARTED"
+
+
+def supervise(argv: list[str]) -> None:
+    """Run the server as a child process and start a fresh one whenever it asks to restart.
+
+    The child shares this console and working directory, so `.env`, the pairing QR code and
+    Ctrl+C behave exactly as before. Any other exit code is passed straight through.
+    """
+    restarted = False
+    while True:
+        env = {**os.environ, SUPERVISED_ENV: "1"}
+        if restarted:
+            env[RESTARTED_ENV] = "1"
+        child = subprocess.Popen([sys.executable, "-m", "jev_remote.cli", *argv], env=env)
+        try:
+            code = child.wait()
+        except KeyboardInterrupt:
+            child.terminate()
+            try:
+                child.wait(timeout=10)
+            except Exception:
+                child.kill()
+            raise SystemExit(130) from None
+        if code != RESTART_EXIT_CODE:
+            raise SystemExit(code)
+        print("\n↻  Restarting the Jev server…\n", flush=True)
+        restarted = True
+
+
 def main(argv: list[str] | None = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if os.environ.get(SUPERVISED_ENV) != "1":
+        supervise(argv)
+        return
+    serve(argv)
+
+
+def serve(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
-    load_dotenv(Path.cwd() / ".env")
+    overlay = load_environment(args.profile)
+    if overlay:
+        print(f"Profile loaded: {overlay.name} (over .env)")
     configure_text_model()
     try:
         settings = Settings.from_env()
     except (RuntimeError, ValueError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         raise SystemExit(2) from exc
-    if os.environ.get("JEV_AUTO_LAUNCH_CHROME", "1").strip().lower() not in {"0", "false", "no"}:
+    restarted = os.environ.get(RESTARTED_ENV) == "1"
+    if restarted:
+        # The browser was closed on purpose; the next command reopens it.
+        print("Server restarted. Chrome stays closed until your next command.")
+    elif os.environ.get("JEV_AUTO_LAUNCH_CHROME", "1").strip().lower() not in {"0", "false", "no"}:
         try:
             print(ensure_chrome())
         except RuntimeError as exc:
@@ -94,7 +165,19 @@ def main(argv: list[str] | None = None) -> None:
         tls = {"ssl_certfile": str(cert), "ssl_keyfile": str(key)}
         scheme = "https"
     print_pairing(app.state.pairing, settings, scheme)
-    uvicorn.run(app, host=settings.host, port=settings.port, **tls)
+    server = uvicorn.Server(uvicorn.Config(app, host=settings.host, port=settings.port, **tls))
+    restart = {"requested": False}
+
+    def request_restart() -> None:
+        restart["requested"] = True
+        # Let the HTTP response reach the phone before the server shuts down.
+        threading.Timer(1.0, lambda: setattr(server, "should_exit", True)).start()
+
+    # Restarting needs the supervisor; a server started directly can only close the browser.
+    app.state.request_restart = request_restart if os.environ.get(SUPERVISED_ENV) == "1" else None
+    server.run()
+    if restart["requested"]:
+        raise SystemExit(RESTART_EXIT_CODE)
 
 
 if __name__ == "__main__":

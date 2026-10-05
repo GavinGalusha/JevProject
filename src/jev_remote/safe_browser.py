@@ -6,8 +6,9 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from jev_ultrafast.browser import Browser, StalePage, fingerprint
+from jev_ultrafast.browser import MARKER, Browser, StalePage, fingerprint
 
+from .banner import banner_js
 from .console import say
 from .player import (
     FULLSCREEN_BUTTON_JS,
@@ -16,6 +17,8 @@ from .player import (
     NOTE_GAVE_UP,
     NOTE_NOT_STARTED,
     NOTE_PLAYING,
+    NOTE_PLAYING_VERIFIED,
+    NOTE_PLAYING_WRONG,
     NOTE_REFRESHED,
     PLAY_BUTTON_JS,
     PLAYER_LABEL,
@@ -24,13 +27,34 @@ from .player import (
     inline_video_js,
     videos_playing,
 )
-from .popups import OVERLAY_PROBE, popup_targets_to_close
+from .popups import (
+    OVERLAY_PROBE,
+    goal_names_site,
+    is_google_outbound,
+    link_sites,
+    popup_targets_to_close,
+    site_of,
+)
 from .series import (
     NOTE_ON_EPISODE,
     on_episode_page,
     relabel_js,
     scroll_to_episode_js,
     season_note,
+)
+from .walls import (
+    NOTE_GAVE_UP as NOTE_WALL_GAVE_UP,
+)
+from .walls import (
+    NOTE_NO_HISTORY as NOTE_WALL_NO_HISTORY,
+)
+from .walls import (
+    NOTE_WENT_BACK as NOTE_WALL_WENT_BACK,
+)
+from .walls import (
+    WALL_PROBE,
+    Avoid,
+    guard_href,
 )
 
 _GUARD_FIELDS = (
@@ -72,6 +96,11 @@ def _use_real_viewport() -> bool:
     return kiosk_enabled() and not fixed
 
 
+def _wait_s(name: str, default_ms: int) -> float:
+    """A wait in seconds from a *_MS setting. The default is the value that used to be fixed."""
+    return _milliseconds(name, default_ms) / 1000
+
+
 def _milliseconds(name: str, default: int) -> int:
     try:
         return max(0, int(os.environ.get(name, "").strip() or default))
@@ -108,6 +137,13 @@ def _target_signature(guard: Any) -> list[Any] | None:
     return guard[:13]
 
 
+OPEN_UI_PROBE = """(() => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  return [...document.querySelectorAll(
+    '[aria-expanded="true"], [role="dialog"], [role="listbox"], [role="menu"], dialog[open]'
+  )].some(visible);
+})()"""
+
 class StableTargetBrowser(Browser):
     """Reject stale targets without treating unrelated dynamic-page churn as navigation.
 
@@ -121,8 +157,13 @@ class StableTargetBrowser(Browser):
     # Set per run by the controller: playback goals wait for the player to appear.
     expect_player: bool = False
     target_episode: tuple[int, int] | None = None  # (season, episode) named in the goal
+    goal_text: str = ""  # the user's request, used to recognise the site they were heading to
     _player_waited_url: str | None = None
     _player_clicks: int = 0
+    _walls_hit: int = 0
+    _last_click: dict[str, Any] | None = None
+    _tabs_before_click: set[str] | None = None
+    _avoid: Avoid | None = None
     _player_refreshes: int = 0
     _player_last_click_at: float = 0.0
     _reload_requested: bool = False
@@ -195,11 +236,134 @@ class StableTargetBrowser(Browser):
                 if not announced:
                     say("   ◷ page is navigating; waiting for it to load", "dim")
                     announced = True
-                time.sleep(0.25)
+                time.sleep(_wait_s("JEV_NAV_POLL_MS", 250))
 
-    def _scroll_to_target_episode(self) -> bool:
-        """Bring the requested episode's row into view; only rows in the viewport are observed."""
+    def show_banner(self, kind: str, title: str, detail: str = "", seconds: float = 5.0) -> bool:
+        """Draw a "Task completed" / "Task failed" card on the page. Best effort."""
+        if not getattr(self, "session", None):
+            return False
+        try:
+            return bool(self.evaluate(banner_js(kind, title, detail, seconds)))
+        except Exception:
+            return False
+
+    def close_open_ui(self) -> bool:
+        """After a finished command, Escape out of any open dropdown, menu or dialog.
+
+        Escape only; it never clicks, so it cannot trigger one more action. Best effort.
+        """
+        if not getattr(self, "session", None):
+            return False
+        try:
+            if not self.evaluate(OPEN_UI_PROBE):
+                return False
+            for event in ("rawKeyDown", "keyUp"):
+                self.call(
+                    "Input.dispatchKeyEvent",
+                    type=event,
+                    key="Escape",
+                    code="Escape",
+                    windowsVirtualKeyCode=27,
+                )
+            say("   ✕ closed an open dropdown/dialog with Escape", "dim")
+            return True
+        except Exception:
+            return False
+
+    def _probe_wall(self) -> dict[str, Any] | None:
+        try:
+            found = self.evaluate(WALL_PROBE)
+        except Exception:
+            return None
+        return found if isinstance(found, dict) else None
+
+    def _drop_avoided(self, page: dict[str, Any]) -> dict[str, Any]:
+        """Hide links that already led to a login wall or CAPTCHA during this command."""
+        if self._avoid:
+            dropped = self._avoid.apply(page)
+            if dropped:
+                page["fingerprint"] = fingerprint(page)
+        return page
+
+    def _go_back(self) -> bool:
+        """One step back in the tab's history. False if there is nothing earlier."""
+        history = self.call("Page.getNavigationHistory")
+        index, entries = history.get("currentIndex", 0), history.get("entries", [])
+        if index <= 0 or index > len(entries) - 1:
+            return False
+        self.call("Page.navigateToHistoryEntry", entryId=entries[index - 1]["id"])
+        deadline = time.monotonic() + 15
+        time.sleep(0.4)
+        while time.monotonic() < deadline:
+            try:
+                if self.evaluate("document.readyState") == "complete":
+                    break
+            except Exception:
+                pass  # still navigating
+            time.sleep(0.2)
+        return True
+
+    def _handle_walls(
+        self, page: dict[str, Any], screenshot: bool, depth: int = 0
+    ) -> dict[str, Any]:
+        """Login wall, paywall or CAPTCHA: back out one step and hide the link that led here."""
+        if not getattr(self, "session", None):
+            return page
+        if os.environ.get("JEV_WALL_BACKTRACK", "1").strip().lower() in {"0", "false", "no"}:
+            return page
+        wall = self._probe_wall()
+        if wall and wall.get("transient"):
+            # Cloudflare-style "checking your browser" pages clear themselves; give them a moment.
+            deadline = time.monotonic() + _milliseconds("JEV_WALL_WAIT_MS", 8000) / 1000
+            while wall and wall.get("transient") and time.monotonic() < deadline:
+                time.sleep(0.5)
+                wall = self._probe_wall()
+            if not wall:
+                # It cleared: the page we read earlier is the check, so read the real one.
+                return self._observe_page(screenshot)
+        if not wall:
+            return page
+
+        self._walls_hit += 1
+        kind, reason = wall.get("kind", "login"), wall.get("reason", "a protected page")
+        say(f"   ⛔ {kind} wall ({reason}); Jev will not go through it", "yellow")
+        limit = _milliseconds("JEV_MAX_WALLS", 3)
+        if self._walls_hit > limit:
+            note = NOTE_WALL_GAVE_UP.format(count=self._walls_hit)
+            return self._with_note(page, note)
+        if not self._go_back():
+            return self._with_note(page, NOTE_WALL_NO_HISTORY.format(kind=kind, reason=reason))
+
+        if self._avoid is None:
+            self._avoid = Avoid()
+        label = self._avoid.remember(self._last_click, page.get("url"))
+        self._last_click = None
+        say("   ↩ went back one step; that link is hidden for the rest of this command", "yellow")
+        back = self._observe_page(screenshot)
+        if depth < 1:
+            back = self._handle_walls(back, screenshot, depth + 1)  # the page before may be one too
+        shown = f" ('{label}')" if label else ""
+        return self._with_note(
+            back, NOTE_WALL_WENT_BACK.format(kind=kind, reason=reason, label=shown)
+        )
+
+    @staticmethod
+    def _with_note(page: dict[str, Any], note: str) -> dict[str, Any]:
+        page["text"] = f"{note}\n{page.get('text', '')}".strip()
+        page["fingerprint"] = fingerprint(page)
+        return page
+
+    def _scroll_to_target_episode(self, page: dict[str, Any] | None = None) -> bool:
+        """Bring the requested episode's row into view; only rows in the viewport are observed.
+
+        Not on the episode's own page: its code also appears in the breadcrumb or footer, and
+        scrolling there would push the video off-screen.
+        """
         if not self.target_episode or not getattr(self, "session", None):
+            return False
+        if page and on_episode_page(
+            page.get("text", ""), self.target_episode, page.get("title", ""), page.get("url", "")
+        ):
             return False
         try:
             if self.evaluate(scroll_to_episode_js(*self.target_episode)):
@@ -208,7 +372,7 @@ class StableTargetBrowser(Browser):
                     f"Episode {self.target_episode[1]}",
                     "dim",
                 )
-                time.sleep(0.25)
+                time.sleep(_wait_s("JEV_SCROLL_SETTLE_MS", 250))
                 return True
         except Exception:
             pass  # best effort
@@ -236,11 +400,13 @@ class StableTargetBrowser(Browser):
                 action["label"] = new
                 changed = True
         note = season_note(result.get("current_season"), self.target_episode)
-        if self.target_episode and on_episode_page(page.get("text", ""), self.target_episode):
+        if self.target_episode and on_episode_page(
+            page.get("text", ""), self.target_episode, page.get("title", ""), page.get("url", "")
+        ):
             season, episode = self.target_episode
             note = NOTE_ON_EPISODE.format(season=season, episode=episode)
         if note:
-            page["text"] = f"{page.get('text', '')}\n{note}".strip()
+            page["text"] = f"{note}\n{page.get('text', '')}".strip()
             changed = True
         if changed:
             page["fingerprint"] = fingerprint(page)
@@ -248,12 +414,14 @@ class StableTargetBrowser(Browser):
 
     def observe(self, screenshot: bool = True):
         page = self._observe_page(screenshot)
-        if self._scroll_to_target_episode():
+        if self._scroll_to_target_episode(page):
             page = self._observe_page(screenshot)  # the row is in view now; read it
         for _ in range(_POPUP_PASSES):
             if not self._clear_interruptions():
                 break
             page = self._observe_page(screenshot)
+        page = self._handle_walls(page, screenshot)
+        page = self._drop_avoided(page)
         page = self._label_series_controls(page)
         page = self._with_video_player(page)
         if self._reload_requested:
@@ -310,7 +478,7 @@ class StableTargetBrowser(Browser):
         try:
             first = self._read_videos(found)
             if first:
-                time.sleep(0.6)
+                time.sleep(_wait_s("JEV_PLAYER_SAMPLE_MS", 600))
                 second = self._read_videos(found) or []
                 return videos_playing(first, second, float(min_duration))
             if first is not None or not final:
@@ -361,7 +529,7 @@ class StableTargetBrowser(Browser):
                 what = "buffering" if loading else "loading"
                 say(f"   ◷ the video is {what}; giving it a few seconds before judging", "dim")
                 announced = True
-            time.sleep(0.5)
+            time.sleep(_wait_s("JEV_PLAYER_POLL_MS", 500))
 
     def _reload_page(self) -> None:
         """Refresh the page: players sometimes wedge on a blank frame or a failed ad."""
@@ -543,8 +711,7 @@ class StableTargetBrowser(Browser):
                         continue
                     self._click_at(offset[0] + inside["x"], offset[1] + inside["y"])
                     detail = "clicked"
-                time.sleep(1.0)
-                if self._is_fullscreen():
+                if self._wait_for_fullscreen():
                     say(f"   ⛶ fullscreen via {name}", "green")
                     self._resume_if_paused(found)
                     return True
@@ -552,6 +719,23 @@ class StableTargetBrowser(Browser):
             except Exception as exc:
                 say(f"   ⛶ {name} failed: {exc}", "dim")
         return False
+
+    def _wait_for_fullscreen(self) -> bool:
+        """Check for fullscreen every JEV_FULLSCREEN_POLL_MS for up to JEV_FULLSCREEN_VERIFY_MS.
+
+        The defaults (1000/1000) are the old behaviour: sleep a second, then check once. A small
+        poll returns the moment fullscreen takes effect.
+        """
+        total = _wait_s("JEV_FULLSCREEN_VERIFY_MS", 1000)
+        poll = max(0.01, _wait_s("JEV_FULLSCREEN_POLL_MS", 1000))
+        waited = 0.0
+        while True:
+            time.sleep(min(poll, max(0.0, total - waited)) if total else 0)
+            waited += poll
+            if self._is_fullscreen():
+                return True
+            if waited >= total:
+                return False
 
     def _resume_if_paused(self, found: dict[str, Any]) -> None:
         """Entering fullscreen must not leave the video paused."""
@@ -606,6 +790,32 @@ class StableTargetBrowser(Browser):
         except Exception:
             return False
 
+    def _playing_note(self, page: dict[str, Any]) -> str:
+        if self.target_episode and not on_episode_page(
+            page.get("text", ""), self.target_episode, page.get("title", ""), page.get("url", "")
+        ):
+            season, episode = self.target_episode
+            return NOTE_PLAYING_WRONG.format(season=season, episode=episode)
+        if self.target_episode:
+            season, episode = self.target_episode
+            return NOTE_PLAYING_VERIFIED.format(season=season, episode=episode)
+        return NOTE_PLAYING
+
+    def _may_host_player(self, page: dict[str, Any]) -> bool:
+        """Is this page worth waiting on for a player to load?
+
+        With JEV_FAST_PLAYER_WAIT=1 and a goal that names an episode, only that episode's own page
+        can hold the player, so the home page, search results and the series list are not waited
+        on. By default (and for a movie) any page might be the watch page, so the wait stays.
+        """
+        if not self.target_episode:
+            return True
+        if os.environ.get("JEV_FAST_PLAYER_WAIT", "").strip().lower() not in {"1", "true", "yes"}:
+            return True  # default: wait on any page, as before
+        return on_episode_page(
+            page.get("text", ""), self.target_episode, page.get("title", ""), page.get("url", "")
+        )
+
     def _probe_player(self) -> dict[str, Any] | None:
         try:
             found = self.evaluate(PLAYER_PROBE)
@@ -621,12 +831,17 @@ class StableTargetBrowser(Browser):
             return page
         found = self._probe_player()
         url = page.get("url")
-        if not found and self.expect_player and url != self._player_waited_url:
+        if (
+            not found
+            and self.expect_player
+            and url != self._player_waited_url
+            and self._may_host_player(page)
+        ):
             # Players are usually injected a moment after load; wait once per page for it.
             self._player_waited_url = url
             deadline = time.monotonic() + _milliseconds("JEV_PLAYER_WAIT_MS", 2500) / 1000
             while not found and time.monotonic() < deadline:
-                time.sleep(0.25)
+                time.sleep(_wait_s("JEV_PLAYER_WAIT_POLL_MS", 250))
                 found = self._probe_player()
         if not isinstance(found, dict) or type(found.get("node")) is not int:
             return page
@@ -638,7 +853,9 @@ class StableTargetBrowser(Browser):
         offer = True
         if self._player_clicks or found.get("playing"):
             if found.get("playing") or self._wait_until_playing(found):
-                note, offer = NOTE_PLAYING, False  # never offer a playing player: a click pauses it
+                # Never offer a playing player (a click pauses it). And only call the goal done if
+                # it is the requested episode: a playing video on the wrong page is not success.
+                note, offer = self._playing_note(page), False
             elif self._player_clicks >= MAX_PLAYER_CLICKS:
                 if self._player_refreshes < MAX_PLAYER_REFRESHES:
                     self._player_refreshes += 1
@@ -656,8 +873,17 @@ class StableTargetBrowser(Browser):
                 if found.get("fullscreen"):
                     self._leave_fullscreen()
         if note:
-            page["text"] = f"{page.get('text', '')}\n{note}".strip()
+            page["text"] = f"{note}\n{page.get('text', '')}".strip()
             say(f"   ▶ {note}", "dim")
+        if offer and found.get("onscreen") is False:
+            # Jev only sees what is on screen, and a click needs the player in view
+            try:
+                self.evaluate(
+                    f"(() => {{ const e = window.__jevFast.nodes.get({found['node']});"
+                    " if (e) e.scrollIntoView({block: 'center'}); })()"
+                )
+            except Exception:
+                pass
         if offer:
             player = {
                 "id": "e_player",
@@ -718,7 +944,30 @@ class StableTargetBrowser(Browser):
             page = self._filter_actions(self._observe_through_navigation(True))
         return page
 
+    def _wait_for_change(self, page: dict[str, Any]) -> None:
+        """After a WAIT, return as soon as the page changes instead of asking the model again.
+
+        Off by default (JEV_WAIT_UNTIL_CHANGE_MS=0). In speed mode the model's WAIT becomes "hold
+        until something changes, up to this long", which saves a model call per extra WAIT.
+        """
+        limit = _wait_s("JEV_WAIT_UNTIL_CHANGE_MS", 0)
+        if limit <= 0:
+            return
+        poll = max(0.01, _wait_s("JEV_WAIT_POLL_MS", 50))
+        deadline = time.monotonic() + limit
+        while time.monotonic() < deadline:
+            try:
+                if self.evaluate(MARKER) != page.get("marker"):
+                    return
+            except Exception:
+                return  # the document is changing, which is what we were waiting for
+            time.sleep(poll)
+
     def act(self, action: dict[str, Any], page: dict[str, Any], text: str | None = None):
+        if action.get("kind") == "wait":
+            result = super().act(action, page, text=text)
+            self._wait_for_change(page)
+            return result
         if action.get("kind") != "click":
             return super().act(action, page, text=text)
         if not self.fresh(page, action):
@@ -788,6 +1037,14 @@ class StableTargetBrowser(Browser):
             raise StalePage("Target changed immediately before input. Observe again.")
         if target.get("position") != [0.5, 0.5]:
             say(f"   ◎ center was unavailable; using safe point {target['position']}", "dim")
+        self._last_click = {
+            "label": action.get("label"),
+            "href": guard_href(page, node),
+            "from_url": page.get("url"),
+            "role": action.get("role"),
+            "player": action.get("id") == "e_player",
+        }
+        self._tabs_before_click = self._page_target_ids()
         for event in ("mousePressed", "mouseReleased"):
             self.call(
                 "Input.dispatchMouseEvent",
@@ -819,10 +1076,96 @@ class StableTargetBrowser(Browser):
             say(f"   ⚠ popup check skipped: {exc}", "dim")
             return False
 
+    def _page_target_ids(self) -> set[str] | None:
+        try:
+            from browser_harness.helpers import cdp
+
+            return {
+                t["targetId"]
+                for t in cdp("Target.getTargets").get("targetInfos", [])
+                if t.get("type") == "page"
+            }
+        except Exception:
+            return None
+
+    def _is_intended_tab(self, url: str, click: dict[str, Any]) -> bool:
+        """Is this new tab where the click was heading, rather than an ad popup?
+
+        Never after clicking the video player (that is where ad popups come from). Otherwise
+        yes if: the clicked link points at that site; Google's own outbound wrapper opened it from
+        a Google page; or the user's own words name the site ("... on Tubi") and the click was a
+        link. An ad's domain is none of these.
+        """
+        if click.get("player"):
+            return False
+        from_site = site_of(click.get("from_url"))
+        if site_of(url) in link_sites(click.get("href")) - {from_site}:
+            return True
+        if from_site == "google.com" and is_google_outbound(url):
+            return True
+        return click.get("role") == "link" and goal_names_site(self.goal_text, url)
+
+    def _follow_new_tabs(self, targets: list[dict[str, Any]]) -> bool:
+        """A link that opens in a new tab is still where the user was going: bring it here."""
+        if os.environ.get("JEV_FOLLOW_NEW_TABS", "1").strip().lower() in {"0", "false", "no"}:
+            return False
+        before, click = self._tabs_before_click, self._last_click or {}
+        if before is None or not click:
+            return False
+        from browser_harness.helpers import cdp
+
+        for tab in targets:
+            url = tab.get("url") or ""
+            if (
+                tab.get("type") != "page"
+                or tab.get("targetId") in before
+                or tab.get("targetId") == self.target
+                or url in {"", "about:blank"}  # still loading: look again on the next read
+                or not self._is_intended_tab(url, click)
+            ):
+                continue
+            say(f"   ↪ a link opened in a new tab; following it: {url[:80]}", "yellow")
+            self.call("Page.navigate", url=url)
+            cdp("Target.closeTarget", targetId=tab["targetId"])
+            cdp("Target.activateTarget", targetId=self.target)
+            self._wait_ready()
+            if is_google_outbound(url):
+                self._wait_off_google()
+            self._tabs_before_click = None
+            return True
+        return False
+
+    def _wait_off_google(self, timeout: float = 6.0) -> None:
+        """Google's outbound wrapper redirects to the real site; wait until we have left Google."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                host = self.evaluate("location.hostname") or ""
+                if host and "google." not in host:
+                    self._wait_ready()
+                    return
+            except Exception:
+                pass  # mid-redirect
+            time.sleep(0.1)
+
+    def _wait_ready(self, timeout: float = 15.0) -> None:
+        deadline = time.monotonic() + timeout
+        time.sleep(0.1)
+        while time.monotonic() < deadline:
+            try:
+                if self.evaluate("document.readyState") == "complete":
+                    return
+            except Exception:
+                pass  # still navigating
+            time.sleep(0.05)
+
     def _close_popup_tabs(self) -> bool:
         from browser_harness.helpers import cdp
 
         targets = cdp("Target.getTargets").get("targetInfos", [])
+        followed = self._follow_new_tabs(targets)
+        if followed:
+            targets = cdp("Target.getTargets").get("targetInfos", [])
         own = next((t for t in targets if t.get("targetId") == self.target), {})
         popups = popup_targets_to_close(targets, self.target, own.get("url"))
         for popup in popups:
@@ -830,7 +1173,7 @@ class StableTargetBrowser(Browser):
             say(f"   ✕ closed popup tab: {str(popup.get('url'))[:80]}", "yellow")
         if popups:
             cdp("Target.activateTarget", targetId=self.target)
-        return bool(popups)
+        return bool(popups) or followed
 
     def _dismiss_overlay(self) -> bool:
         limit = _milliseconds("JEV_MAX_POPUP_DISMISSALS", 8)
@@ -864,7 +1207,7 @@ class StableTargetBrowser(Browser):
                     button="left" if event != "mouseMoved" else "none",
                     clickCount=1 if event != "mouseMoved" else 0,
                 )
-        time.sleep(0.35)
+        time.sleep(_wait_s("JEV_POPUP_SETTLE_MS", 350))
         return True
 
     def _dismiss_native_dialog(self) -> None:

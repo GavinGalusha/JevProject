@@ -44,6 +44,7 @@ label { display: block; margin: 0 0 8px 4px; color: var(--muted); font-size: .65
 .status-dot.stopped { background: #ff4858; box-shadow: 0 0 16px #ff4858; }
 @keyframes pulse { 50% { opacity: .35; } }
 .kill-button, .arm-button { width: 100%; min-height: 54px; margin: -8px 0 22px; border: 1px solid #7a2630; border-radius: 13px; color: #ff6573; background: #281116; font-size: .72rem; font-weight: 900; letter-spacing: .16em; }
+.close-button { width: 100%; min-height: 48px; margin: -8px 0 22px; border: 1px solid #4a4230; border-radius: 13px; color: #e8b64c; background: #211c10; font-size: .68rem; font-weight: 900; letter-spacing: .14em; }
 .arm-button { border-color: #315d43; color: #63dc94; background: #102218; }
 .controls { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
 .controls button { min-height: 74px; border: 1px solid var(--line); border-radius: 15px; color: #eee; background: var(--panel); display: grid; place-content: center; gap: 5px; }
